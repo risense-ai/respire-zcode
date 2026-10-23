@@ -1,0 +1,21 @@
+{
+  "name": "respire",
+  "version": "0.1.0",
+  "description": "respire memory for ZCode: every-round title-tier recall, one-prefix store, model-optional degradation. Register on rsrs.rs for sync; the sidecar model is an optional boost.",
+  "author": {
+    "name": "risense-ai"
+  },
+  "homepage": "https://github.com/risense-ai/respire-zcode",
+  "repository": "https://github.com/risense-ai/respire-zcode",
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "respire",
+    "rsrs",
+    "recall",
+    "hooks",
+    "local-first"
+  ],
+  "skills": "./skills",
+  "hooks": "./hooks/hooks.json"
+}

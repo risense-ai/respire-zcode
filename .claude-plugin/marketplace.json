@@ -1,0 +1,26 @@
+{
+  "name": "risense-zcode",
+  "owner": {
+    "name": "risense-ai"
+  },
+  "metadata": {
+    "description": "risense-ai ZCode plugins",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "respire",
+      "source": "./",
+      "version": "0.1.0",
+      "description": "respire memory for ZCode: every-round title-tier recall, one-prefix store, model-optional degradation.",
+      "displayName": "respire",
+      "displayName_i18n": {
+        "zh-CN": "respire 记忆"
+      },
+      "description_i18n": {
+        "zh-CN": "respire 本地加密记忆：每轮自动召回、一句「记：」落库、Stop 存储检查，不装模型也完全可用。"
+      },
+      "category": "productivity"
+    }
+  ]
+}

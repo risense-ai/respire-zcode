@@ -1,0 +1,11 @@
+# 用户本地配置不进仓（安装时由 example 生成）
+hooks/respire.config.json
+__pycache__/
+*.pyc
+*.bak*
+.DS_Store
+.omo/
+.codegraph/
+hooks/hook.log
+hooks/.nudge_counter
+dist/

@@ -1,0 +1,90 @@
+name: release
+
+# 通路（与 respire-dimcode 同一口径）：
+# - push main / PR 到 main：只跑 validate（结构/清单/hooks/敏感扫描）。
+# - push 形如 *.*.* 的 tag：validate + package，自动建 GitHub Release 并上传 zip。
+# - workflow_dispatch：validate + package（只上传 artifact，不建 release），用于全链演练。
+# 说明：tests/test_hooks.sh 不进 CI——其断言依赖 rsrs 引擎与 runtime（无 runtime 环境下
+# 装 CLI 也只能走 recall 失败路径，断言不可靠），测试留给有引擎的开发机。
+
+on:
+  push:
+    branches: [main]
+    tags: ['*.*.*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: '结构/清单/hooks/敏感扫描自检（上游脚本）'
+        run: python3 scripts/validate_plugin.py
+
+  package:
+    needs: validate
+    if: >-
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
+      || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 'tag 须等于 manifest version'
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VER="$(python3 -c "import json; print(json.load(open('.zcode-plugin/plugin.json'))['version'])")"
+          if [ "${TAG}" != "${VER}" ]; then
+            echo "tag ${TAG} != manifest version ${VER}" >&2
+            exit 1
+          fi
+
+      - name: '按共用口径打包'
+        id: pkg
+        run: |
+          bash scripts/package.sh > pkg.out
+          ZIP_PATH="$(sed -n 1p pkg.out)"
+          ZIP_SHA="$(sed -n 2p pkg.out)"
+          test -s "${ZIP_PATH}"
+          echo "zip=${ZIP_PATH}" >> "${GITHUB_OUTPUT}"
+          echo "sha=${ZIP_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "zipname=$(basename "${ZIP_PATH}")" >> "${GITHUB_OUTPUT}"
+          rm -f pkg.out
+
+      - name: '建 Release 并上传（仅 tag）'
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NOTES="$(mktemp)"
+          {
+            echo "自动打包产物（构建基线 commit ${GITHUB_SHA}）。"
+            echo
+            echo '- asset: '"${{ steps.pkg.outputs.zipname }}"
+            echo '- sha256: '"${{ steps.pkg.outputs.sha }}"
+            echo '- 包结构：zip 根=插件根，`.zcode-plugin/plugin.json` 在根'
+            echo '- ZCode 安装：插件市场 → 添加 → 添加插件市场，粘贴本仓目录（或解压本 zip 后粘贴解压目录），在「个人 → risense-zcode」安装 respire'
+            echo '- 引擎（rsrs CLI）缺失时插件会在会话内注入装法（`npm i -g @rsrsai/cli@latest`）'
+          } > "${NOTES}"
+          gh release create "${GITHUB_REF_NAME}" "${{ steps.pkg.outputs.zip }}" \
+            --target "${GITHUB_SHA}" \
+            --title "respire ${GITHUB_REF_NAME}" \
+            --notes-file "${NOTES}" \
+            || gh release upload "${GITHUB_REF_NAME}" "${{ steps.pkg.outputs.zip }}" --clobber
+          rm -f "${NOTES}"
+
+      - name: '上传构建 artifact（仅 dispatch 演练）'
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-zip
+          path: dist/*.zip
+          if-no-files-found: error
