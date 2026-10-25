@@ -2,7 +2,7 @@
 
 > 吸即存，呼即取——给 ZCode 装上本地加密记忆。
 
-`respire` 是 ZCode 标准插件：以命令钩子把 [respire（CLI 名 rsrs）](https://www.npmjs.com/package/@rsrsai/cli) 记忆引擎挂进 agent 循环——每轮标题档自动召回、「记：」一前缀即落库、Stop 存储检查。本地优先、端侧加密、云端 LWW 同步；**不带自定义安装脚本，按 ZCode 插件市场标准安装**。
+`respire` 是 ZCode 标准插件：以命令钩子把 [respire（CLI 名 rsrs）](https://www.npmjs.com/package/rsrs-cli) 记忆引擎挂进 agent 循环——每轮标题档自动召回、「记：」一前缀即落库、Stop 存储检查。本地优先、端侧加密、云端 LWW 同步；**不带自定义安装脚本，按 ZCode 插件市场标准安装**。
 
 姊妹仓：[respire-dimcode](https://github.com/risense-ai/respire-dimcode)（Dim）· [respire-qoder](https://github.com/risense-ai/respire-qoder)（Qoder）· respire-workbuddy（WorkBuddy）——四宿主共用同一钩子方案与打包口径，差异只在宿主协议适配。
 
@@ -24,7 +24,7 @@ python3 scripts/validate_plugin.py                     # 自检：结构/清单/
 2. **个人 → risense-zcode → respire → 安装**；
 3. **新会话**生效——SessionStart 注入简则即标志挂接成功。
 
-引擎（rsrs CLI）缺失时插件会在会话内注入装法（`npm i -g @rsrsai/cli@latest`），可让 agent 代装。
+引擎（rsrs CLI）缺失时插件会在会话内注入装法（`npm i -g rsrs-cli@latest`），可让 agent 代装。
 
 管理入口：**设置 → 插件**。插件钩子随安装自动生效，无需另开配置开关。
 
@@ -32,7 +32,7 @@ python3 scripts/validate_plugin.py                     # 自检：结构/清单/
 
 插件只做三件，装完自走一条生命周期：
 
-1. **引擎未装时＝安装器**：SessionStart 把安装命令直接注给 agent 代跑（`npm i -g @rsrsai/cli@latest`＋权限兜底＋`rsrs --version` 验证），并顺手交代配置下一步（rsrs.rs 注册／`rsrs register`／模型可选）——无需用户手动操作；
+1. **引擎未装时＝安装器**：SessionStart 把安装命令直接注给 agent 代跑（`npm i -g rsrs-cli@latest`＋权限兜底＋`rsrs --version` 验证），并顺手交代配置下一步（rsrs.rs 注册／`rsrs register`／模型可选）——无需用户手动操作；
 2. **检测就绪＝自动切正常钩子**：每轮实时探测，引擎装完**同会话内**即恢复简则、召回与「记：」落库；
 3. **管理器三档开关**（见下「启用与关闭」）。
 

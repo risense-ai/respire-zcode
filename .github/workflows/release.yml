@@ -72,7 +72,7 @@ jobs:
             echo '- sha256: '"${{ steps.pkg.outputs.sha }}"
             echo '- 包结构：zip 根=插件根，`.zcode-plugin/plugin.json` 在根'
             echo '- ZCode 安装：插件市场 → 添加 → 添加插件市场，粘贴本仓目录（或解压本 zip 后粘贴解压目录），在「个人 → risense-zcode」安装 respire'
-            echo '- 引擎（rsrs CLI）缺失时插件会在会话内注入装法（`npm i -g @rsrsai/cli@latest`）'
+            echo '- 引擎（rsrs CLI）缺失时插件会在会话内注入装法（`npm i -g rsrs-cli@latest`）'
           } > "${NOTES}"
           gh release create "${GITHUB_REF_NAME}" "${{ steps.pkg.outputs.zip }}" \
             --target "${GITHUB_SHA}" \

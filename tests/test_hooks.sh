@@ -99,7 +99,7 @@ except SystemExit:
     pass
 PY
 }
-check "引擎缺失注入装法" "$(run_engineless)" "含:npm i -g @rsrsai/cli"
+check "引擎缺失注入装法" "$(run_engineless)" "含:npm i -g rsrs-cli"
 check "引导禁自造超级密码" "$(run_engineless)" "含:绝不传 --super"
 check "引导要求保存恢复码" "$(run_engineless)" "含:务必抄下保存"
 check "引擎缺失含注册站点" "$(run_engineless)" "含:rsrs.rs"
