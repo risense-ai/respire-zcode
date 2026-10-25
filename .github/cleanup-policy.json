@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "repository": "risense-ai/respire-zcode",
+  "workflows": {
+    ".github/workflows/release.yml": {
+      "mode": "completed",
+      "artifacts": [
+        "plugin-zip"
+      ],
+      "consumer_workflows": []
+    }
+  }
+}
