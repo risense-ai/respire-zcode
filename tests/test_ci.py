@@ -140,9 +140,12 @@ else: sys.exit(1)
         self.assertIn('auto-recall', output)
         self.assertIn('matched 1 item(s)', output)
         self.assertIn('[0.90] spy', output)
+        return output
 
     def test_normal_input_requires_live_spy(self):
-        self.positive_control()
+        output = self.positive_control()
+        self.assertNotIn('\n', output)
+        self.assertIn('[0.90] spy', json.loads(output)['additionalContext'])
 
     def test_credential_has_zero_calls_and_no_disclosure(self):
         self.positive_control()
@@ -177,6 +180,7 @@ else: sys.exit(1)
 
     def test_session_uses_only_stub_status(self):
         out = self.call(event='SessionStart')
+        self.assertIn('respire memory layer', json.loads(out)['additionalContext'])
         self.assertIn('respire memory layer', out)
         self.assertNotIn('not signed in', out)
         self.assertEqual([args[0] for args in self.recorded()], ['status'])
