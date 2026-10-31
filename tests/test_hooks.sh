@@ -81,7 +81,7 @@ check "包内无自定义安装脚本" "$( { [ -e "$ROOT/install.sh" ] || [ -e "
 run SessionStart >/dev/null
 run UserPromptSubmit "我的密码是 password: hunter2 这算敏感吗" >/dev/null
 check "日志脱敏口令" "$(grep -q 'hunter2' "$TMP/hook.log" && echo LEAK || echo SAFE)" "含:SAFE"
-check "日志脱敏留痕" "$(grep -q 'REDACTED' "$TMP/hook.log" && echo YES)" "含:YES"
+check "secret_skip 只记事件码不落输入" "$(grep '"out": "secret_skip"' "$TMP/hook.log" | grep -v '"d"' | grep -q . && echo BARE || echo DETAIL)" "含:BARE"
 check "hook.log 留痕" "$(grep -q '"ev": "session"' "$TMP/hook.log" 2>/dev/null && echo YES)" "含:YES"
 
 # 引擎缺失分支：单元注入 monkeypatch find_rsrs→None（真机造不出「全路径皆缺」）
@@ -175,8 +175,45 @@ print("OK" if m and int(m.group(1))==n else "BAD")')" "含:OK"
 check "无关 prompt 不注入" "$(run UserPromptSubmit "今晚吃什么菜好呢")" "空"
 check "单字 prompt 跳过" "$(run UserPromptSubmit "嗯")" "空"
 check "/nomem 关闭召回" "$(run UserPromptSubmit "/nomem rsrs 信封结构")" "空"
-check "疑似凭据不发引擎" "$(run UserPromptSubmit "api_key = sk-abcdefghijklmnopqrst 存一下")" "含:contains a credential"
-check "疑似凭据不落库" "$(run UserPromptSubmit "记：数据库密码 = hunter2u")" "含:contains a credential"
+# 合成凭据守卫（审计回归）：凭据轮须零引擎调用（recall/remember 均不发）、hook.log 与
+# 注入输出均不得含合成值。合成值运行时拼接——仓库不出现 sk-<16+位> 字面量，
+# 分发前静态扫描（scripts/validate_plugin.py）本体未动。引擎桩另作「正常轮确实会过引擎」的对照，
+# 证明零调用断言不是桩失联造成的假通过。桩用原生路径（Windows python 解析不了 MSYS 的 /tmp）。
+SYN="sk-""abcdefghijklmnopqrst"
+GUARD_LOG="$TMP/guard-calls.log"; : > "$GUARD_LOG"
+TMPN="$(cygpath -m "$TMP" 2>/dev/null || printf '%s' "$TMP")"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    STUB_GUARD="$TMPN/rsrs-guard.bat"
+    sed 's/$/\r/' > "$TMP/rsrs-guard.bat" <<EOF
+@echo off
+>>"$TMPN/guard-calls.log" echo guard-called
+exit /b 0
+EOF
+    ;;
+  *)
+    STUB_GUARD="$TMPN/rsrs-guard"
+    cat > "$TMP/rsrs-guard" <<EOF
+#!/usr/bin/env bash
+printf 'guard-called\n' >> "$TMPN/guard-calls.log"
+exit 0
+EOF
+    chmod +x "$TMP/rsrs-guard"
+    ;;
+esac
+CFG_GUARD="$TMP/config-guard.json"
+echo '{"session_rules": true, "rsrs": "'"$STUB_GUARD"'"}' > "$CFG_GUARD"
+out=$(run UserPromptSubmit "api_key = ${SYN} 存一下" "$CFG_GUARD")
+check "疑似凭据不发引擎" "$out" "含:contains a credential"
+check "凭据注入不含合成值" "$out" "不含:${SYN}"
+check "凭据轮引擎零调用(recall)" "$( [ -s "$GUARD_LOG" ] && echo CALLED || echo CLEAN )" "含:CLEAN"
+check "凭据值不落 hook.log" "$(grep -qF -- "$SYN" "$TMP/hook.log" && echo LEAK || echo SAFE)" "含:SAFE"
+out=$(run UserPromptSubmit "记：数据库密码 = hunter2u" "$CFG_GUARD")
+check "疑似凭据不落库" "$out" "含:contains a credential"
+check "凭据轮引擎零调用(remember)" "$( [ -s "$GUARD_LOG" ] && echo CALLED || echo CLEAN )" "含:CLEAN"
+: > "$GUARD_LOG"
+run UserPromptSubmit "rsrs 信封 JSON 结构解析取哪层" "$CFG_GUARD" >/dev/null
+check "守卫桩通路自检(正常轮过引擎)" "$( [ -s "$GUARD_LOG" ] && echo CALLED || echo CLEAN )" "含:CALLED"
 check "技能指认轮剥前缀仍召回" "$(run UserPromptSubmit '$skill: 笔痕 rsrs 信封 JSON 结构解析取哪层')" "含:auto-recall"
 echo '{"session_rules": true, "skip_prefixes": ["你正在为宿主写 Recap"]}' > "$TMP/config-skip.json"
 check "skip_prefixes 白名单跳过" "$(run UserPromptSubmit "你正在为宿主写 Recap：无事" "$TMP/config-skip.json")" "空"

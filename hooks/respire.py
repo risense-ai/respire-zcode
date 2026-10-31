@@ -488,7 +488,9 @@ def on_prompt(data: dict, cfg: dict, engine) -> str:
             log_event(cfg, "prompt", "internal_skip", pat)
             return ""
     if contains_secret(prompt):
-        log_event(cfg, "prompt", "secret_skip", prompt[:40])
+        # 只记固定事件码：redact 不覆盖 api_key/token/secret 普通赋值与 Bearer 值，
+        # 落任何输入摘要都可能把凭据带进日志——凭据轮日志零内容
+        log_event(cfg, "prompt", "secret_skip")
         return SECRET_SKIP
     m = STORE_PREFIX.match(prompt)
     if m:

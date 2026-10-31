@@ -11,7 +11,7 @@
     {
       "name": "respire",
       "source": "./",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "respire memory for ZCode: every-round title-tier recall, one-prefix store, model-optional degradation.",
       "displayName": "respire",
       "displayName_i18n": {
