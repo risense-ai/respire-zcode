@@ -1,97 +1,105 @@
 name: release
 
-# 通路（与 respire-dimcode 同一口径）：
-# - push main / PR 到 main：只跑 validate（结构/清单/hooks/敏感扫描）。
-# - push 形如 *.*.* 的 tag：validate + package，自动建 GitHub Release 并上传 zip。
-# - workflow_dispatch：validate + package（只上传 artifact，不建 release），用于全链演练。
-# 说明：tests/test_hooks.sh 不进 CI——其断言依赖 rsrs 引擎与 runtime（无 runtime 环境下
-# 装 CLI 也只能走 recall 失败路径，断言不可靠），测试留给有引擎的开发机。
-
 on:
+  pull_request:
   push:
     branches: [main]
     tags: ['*.*.*']
-  pull_request:
-    branches: [main]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing MAJOR.MINOR.PATCH tag to recover
+        required: true
+      expected_sha:
+        description: Exact existing tag commit (40 hexadecimal characters)
+        required: true
 
 permissions:
   contents: read
 
+concurrency:
+  group: respire-zcode-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
-  validate:
-    runs-on: ubuntu-latest
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - name: '结构/清单/hooks/敏感扫描自检（上游脚本）'
-        run: python3 scripts/validate_plugin.py
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - run: python scripts/validate_plugin.py
+      - run: python tests/test_ci.py
+      - run: python -m unittest discover -s tests -p test_release.py -v
 
   package:
-    needs: validate
-    if: >-
-      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
-      || github.event_name == 'workflow_dispatch'
+    needs: check
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      publish: ${{ steps.package.outputs.publish }}
+      tag: ${{ steps.package.outputs.tag }}
+      sha: ${{ steps.package.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Archive exact source and verify package
+        id: package
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: python scripts/release.py prepare
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: plugin-zip
+          path: release-out/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: package
+    # PRs, including forks, can only check/package. Recovery must use main.
+    if: >-
+      needs.package.outputs.publish == 'true' &&
+      ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) ||
+       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-
-      - name: 'tag 须等于 manifest version'
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          TAG="${GITHUB_REF_NAME}"
-          VER="$(python3 -c "import json; print(json.load(open('.zcode-plugin/plugin.json'))['version'])")"
-          if [ "${TAG}" != "${VER}" ]; then
-            echo "tag ${TAG} != manifest version ${VER}" >&2
-            exit 1
-          fi
-
-      - name: '按共用口径打包'
-        id: pkg
-        run: |
-          bash scripts/package.sh > pkg.out
-          ZIP_PATH="$(sed -n 1p pkg.out)"
-          ZIP_SHA="$(sed -n 2p pkg.out)"
-          test -s "${ZIP_PATH}"
-          echo "zip=${ZIP_PATH}" >> "${GITHUB_OUTPUT}"
-          echo "sha=${ZIP_SHA}" >> "${GITHUB_OUTPUT}"
-          echo "zipname=$(basename "${ZIP_PATH}")" >> "${GITHUB_OUTPUT}"
-          rm -f pkg.out
-
-      - name: '建 Release 并上传（仅 tag）'
-        if: startsWith(github.ref, 'refs/tags/')
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: plugin-zip
+          path: release-out
+      - name: Publish or verify identical existing assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          NOTES="$(mktemp)"
-          {
-            echo "自动打包产物（构建基线 commit ${GITHUB_SHA}）。"
-            echo
-            echo '- asset: '"${{ steps.pkg.outputs.zipname }}"
-            echo '- sha256: '"${{ steps.pkg.outputs.sha }}"
-            echo '- 包结构：zip 根=插件根，`.zcode-plugin/plugin.json` 在根'
-            echo '- ZCode 安装：插件市场 → 添加 → 添加插件市场，粘贴本仓目录（或解压本 zip 后粘贴解压目录），在「个人 → risense-zcode」安装 respire'
-            echo '- 引擎（rsrs CLI）缺失时插件会在会话内注入装法（`npm i -g rsrs-cli@latest`）'
-          } > "${NOTES}"
-          gh release create "${GITHUB_REF_NAME}" "${{ steps.pkg.outputs.zip }}" \
-            --target "${GITHUB_SHA}" \
-            --title "respire ${GITHUB_REF_NAME}" \
-            --notes-file "${NOTES}" \
-            || gh release upload "${GITHUB_REF_NAME}" "${{ steps.pkg.outputs.zip }}" --clobber
-          rm -f "${NOTES}"
-
-      - name: '上传构建 artifact（仅 dispatch 演练）'
-        if: github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v4
-        with:
-          retention-days: 1
-          name: plugin-zip
-          path: dist/*.zip
-          if-no-files-found: error
+          RELEASE_TAG: ${{ needs.package.outputs.tag }}
+          EXPECTED_SHA: ${{ needs.package.outputs.sha }}
+        run: python scripts/release.py publish
 
   cleanup-receipt:
-    needs: [validate, package]
+    needs: [check, package, publish]
     if: ${{ always() && !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -99,14 +107,14 @@ jobs:
       contents: read
       actions: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
       - name: Record the completed producer and delivery inventory
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 .github/scripts/cleanup_artifacts.py stamp
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: cleanup-ready-v1
           path: ${{ runner.temp }}/cleanup-ready.json
