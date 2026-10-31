@@ -11,3 +11,9 @@ hooks/.nudge_counter
 dist/
 
 release-out/
+
+# 运行期产物（hook 诊断与测试），不进仓
+hook.log
+.nudge_counter
+.pending_nudge
+spy-calls.log
