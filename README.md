@@ -122,3 +122,15 @@ git tag 0.1.0 && git push origin 0.1.0   # tag 须等于 manifest version
 ## License
 
 MIT
+
+## GitHub Actions CI/CD
+
+PR/main 在 Linux、Windows、macOS 执行包自检、全桩隔离行为/版本测试和发布策略测试，再验证源码归档。CI 入口为 `python tests/test_ci.py` 与 `python -m unittest discover -s tests -p test_release.py -v`，不会运行旧 `test_hooks.sh` 的真实引擎/写探针段。测试使用临时 HOME、配置、数据、日志和引擎桩；普通输入必须召回成功，死桩/坏 JSON 必须无法通过正向对照，凭据轮零引擎调用且无日志泄漏。
+
+沿用不带 v 的三段版本标签及原插件根目录布局；ZIP 名仍为 `respire-版本-YYYYMMDD.zip`，日期固定取源提交 UTC 日期以使重试稳定。ZIP 注释为精确提交 SHA；标签、manifest、hook VERSION（及已有市场版本字段）必须一致。旧 `scripts/package.sh` 保留供原本地流程使用，新 Actions 只归档已提交文件，不执行标签中的代码。
+
+发布/恢复：正常推送新版本标签触发；已有标签可从 Actions → release → Run workflow 选择 main，显式填写 tag 和完整 expected_sha。流程校验远端既有标签与 main 祖先关系，不移动标签、不用新 main 冒充旧代码。只接受同来源、同校验和的已有资产；补缺失，不覆盖冲突，Release 同时提供 ZIP 与 SHA256SUMS。
+
+默认 contents:read、checkout 不持久化凭据；仅独立受控发布 job 使用 GITHUB_TOKEN 的 contents:write。无新 secret/PAT/OAuth，不使用 pull_request_target，fork PR 不可发布。同版 tag/恢复共用并发锁。原 plugin-zip artifact 名、cleanup-receipt、清理策略/脚本保留，清理收据等待检查、打包和发布消费者结束。
+
+三平台桩测试不等于真实 ZCode 宿主、GUI 派发或安装后的解释器回退验收；旧完整测试套件与作者称基线失败仍不作为独立通过证据。
