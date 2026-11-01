@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.5 — 2026-11-01 · 第三轮复核整改（同会话请求隔离）
+
+### Fixed
+
+- **请求代凭证绑定（复核①）**：`mark_prompt` 返回请求代 gen；`do_store` 在调用入口捕获 gen，成功回执 `mark_store(session, gen)` 记 `store_req_ts`；`turn_stored` 要求 `store_req_ts == prompt_ts`——同会话旧请求（R1）的 remember 在新请求（R2）prompt 之后完成，凭证带 R1 的 gen，**不免催 R2**（屏障测试：R1 写暂停→R2 prompt→R1 完成→R2 不被免催；R2 自己的写→免催）。
+- **同会话 RMW 事务锁（复核②）**：`_map_lock`——`O_CREAT|O_EXCL` 独占 lockfile（跨进程），`_map_update` 在锁内 读→改→temp+rename；陈旧锁兜底只看锁文件年龄（mtime>5s，持有者已崩），等待超窗放弃更新（保守方向：丢免催凭证→多一轮有界收催）。旧进程持旧快照写回不可能交错回滚新 prompt（持锁互斥测试）。
+- **内部提示在 mark_prompt 之前过滤（复核附注）**：宿主内部 Recap 不是真实新请求——不记请求代、不重武装一次收尾锁（真实请求→deny→内部 Recap→Stop 不二次 deny，CI 专项测试）。
+
+### Changed
+
+- 测试：CI 37/37（+3：请求代绑定两向屏障、RMW 事务锁互斥/陈旧兜底、内部前缀不重武装）。
+
+## 0.1.4 — 2026-11-01
 ## 0.1.4 — 2026-11-01 · 增量复审整改（PR #4 review round 2）
 
 ### Fixed

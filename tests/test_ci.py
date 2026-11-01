@@ -434,6 +434,97 @@ else: sys.exit(1)
             self.assertNotIn('may already be written', out, mode)
             self.assertEqual([a[0] for a in self.recorded()][before:], ['remember', 'list'], mode)
 
+    def test_stale_request_receipt_does_not_suppress_new_request(self):
+        # 第三轮复核①：同会话 R1 写暂停 → R2 prompt → R1 完成——R1 凭证带旧 gen，不免催 R2
+        import importlib.util as iu2
+        from pathlib import Path as P2
+        spec = iu2.spec_from_file_location('rh3', P2(self.env['TEST_HOOK']))
+        mod = iu2.module_from_spec(spec); spec.loader.exec_module(mod)
+        base = P2(self.env['RESPITE_TURN_STATE'])
+        import os as os2
+        old = os2.environ.get('RESPITE_TURN_STATE')
+        try:
+            os2.environ['RESPITE_TURN_STATE'] = str(base)
+            base.mkdir(parents=True, exist_ok=True)
+            sid = 'genbind'
+            gen1 = mod.mark_prompt(sid)          # R1 请求开始
+            # R1 的 remember 「暂停」——期间 R2 到来：
+            gen2 = mod.mark_prompt(sid)          # R2 真实新请求（prompt_ts 推进）
+            self.assertGreater(gen2, gen1)
+            mod.mark_store(sid, gen1)            # R1 的写此刻才完成（旧 gen 凭证）
+            self.assertFalse(mod.turn_stored(sid))  # R2 不被免催
+            mod.mark_store(sid, gen2)            # R2 自己的写完成
+            self.assertTrue(mod.turn_stored(sid))   # 当前代凭证免催
+        finally:
+            if old is not None:
+                os2.environ['RESPITE_TURN_STATE'] = old
+
+    def test_same_session_rmw_is_transactional(self):
+        import time as _t
+        # 第三轮复核②：旧进程已读快照 → 新 prompt 提交 → 旧进程写回——事务锁保证新 prompt 不回滚
+        import importlib.util as iu2
+        from pathlib import Path as P2
+        spec = iu2.spec_from_file_location('rh4', P2(self.env['TEST_HOOK']))
+        mod = iu2.module_from_spec(spec); spec.loader.exec_module(mod)
+        base = P2(self.env['RESPITE_TURN_STATE'])
+        import os as os2, json as j2
+        old = os2.environ.get('RESPITE_TURN_STATE')
+        try:
+            os2.environ['RESPITE_TURN_STATE'] = str(base)
+            base.mkdir(parents=True, exist_ok=True)
+            sid = 'rmtx'
+            mod.mark_prompt(sid)
+            sp = P2(mod._state_path(sid))
+            stale = j2.loads(sp.read_text(encoding='utf-8'))   # 旧进程读到旧快照
+            gen2 = mod.mark_prompt(sid)                         # 新 prompt 提交（prompt_ts 前进）
+            self.assertFalse(mod.turn_stored(sid))              # 新代未写：不免催
+            # 事务锁保证：本进程持锁读改写期间，另一持锁进程不可能交错写回
+            # （直接验证锁的互斥；外部无锁裸写不在插件控制面内）
+            self.assertTrue(mod._map_update(sid, {'store_ts': _t.time(), 'store_req_ts': gen2}))
+            self.assertTrue(mod.turn_stored(sid))               # 同代凭证：免催
+            # 旧代凭证（gen1）完成后写回：store_req_ts 回到旧代 → 不免催新代（复审①交错）
+            self.assertTrue(mod._map_update(sid, {'store_ts': _t.time(), 'store_req_ts': stale.get('prompt_ts', 0)}))
+            self.assertFalse(mod.turn_stored(sid))
+            # 持锁期间另一进程的 _map_update 保守放弃（新鲜锁不抢、等待超窗返回 False）
+            lock = mod._map_lock(sid, wait_s=0.05)
+            try:
+                self.assertIsNotNone(lock)
+                self.assertFalse(mod._map_update(sid, {'store_ts': 1.0, 'store_req_ts': stale.get('prompt_ts', 0)}))
+            finally:
+                import os
+                try:
+                    os.remove(lock)
+                except OSError:
+                    pass
+            # 解锁后正常更新可用
+            gen_now = mod._map_load(sid).get('prompt_ts')
+            self.assertTrue(mod._map_update(sid, {'store_ts': _t.time(), 'store_req_ts': gen_now}))
+            self.assertTrue(mod.turn_stored(sid))
+        finally:
+            if old is not None:
+                os2.environ['RESPITE_TURN_STATE'] = old
+
+    def test_internal_prefix_prompt_does_not_rearm_latch(self):
+        # 第三轮附注：内部 Recap 在 mark_prompt 之前过滤——真实请求 deny 后内部 Recap 不重武装
+        import json as j3, subprocess as sp3, sys as sy3
+        from pathlib import Path as P3
+        cfg_skip = {'rsrs': j3.loads(P3(self.config).read_text(encoding='utf-8'))['rsrs'],
+                    'session_rules': True, 'store_nudge_every': 1,
+                    'skip_prefixes': ['Host internal recap']}
+        cfgp = P3(self.config).parent / 'skipcfg.json'
+        cfgp.write_text(j3.dumps(cfg_skip), encoding='utf-8')
+        def call_skip(event, prompt, session):
+            payload = j3.dumps({'prompt': prompt, 'hook_event_name': event,
+                                'stop_hook_active': False, 'session_id': session})
+            env = {k: v for k, v in self.env.items()}
+            env['RESPITE_CONFIG'] = str(cfgp)
+            r = sp3.run([sy3.executable, self.env['TEST_HOOK']], input=payload, text=True,
+                        capture_output=True, env=env, cwd=str(cfgp.parent), timeout=30)
+            return r.stdout.strip()
+        self.assertIn('block', call_skip('Stop', '', 's9'))                 # 真实请求后的 Stop：deny（落锁）
+        self.assertEqual(call_skip('UserPromptSubmit', 'Host internal recap: summary', 's9'), '')  # 内部 Recap：无输出
+        self.assertEqual(call_skip('Stop', '', 's9'), '')                    # 锁未被内部 Recap 重武装：放行
+
     def test_stop_never_queries_engine(self):
         # 复核整改：Stop 完全不再查询引擎——无归属的全库时间抑制已移除（B 会话写入不会误免催 A），
         # 也没有任何「查库失败强迫续跑」的路径；任何 list 模式（recent/failed/malformed）行为一致
@@ -467,8 +558,9 @@ else: sys.exit(1)
         os.environ['RESPITE_TURN_STATE'] = str(base)
         try:
             now = _t.time()
-            # A 旧轮：prompt_ts=now-100、store_ts=now-50（旧轮已写，凭证仍新鲜）
-            self.assertTrue(mod._map_update('A', {'prompt_ts': now - 100, 'store_ts': now - 50}))
+            # A 旧轮：prompt_ts=now-100、store=now-50（同代凭证，仍新鲜）
+            self.assertTrue(mod._map_update('A', {'prompt_ts': now - 100, 'store_ts': now - 50,
+                                                  'store_req_ts': now - 100}))
             self.assertTrue(mod.turn_stored('A'))
             a_path = base / ('st_' + mod._sid_key('A') + '.json')
             self.assertTrue(a_path.is_file())
@@ -479,13 +571,13 @@ else: sys.exit(1)
             mod._map_update('B', {'prompt_ts': now - 999, 'store_ts': now - 999})
             self.assertEqual(a_path.read_bytes(), raw_before)   # A 文件逐字节不变
             self.assertFalse((base / 'turn_map.json').exists())  # 共享 map 已不存在
-            # A 新真实请求：prompt_ts > store_ts → 旧 store 不再免催；B 的写不影响该判定
-            mod.mark_prompt('A')
+            # A 新真实请求：旧代凭证不免催；B 的写不影响该判定
+            genA2 = mod.mark_prompt('A')
             self.assertFalse(mod.turn_stored('A'))
             mod.mark_store('B')
             self.assertFalse(mod.turn_stored('A'))
-            # A 新写入凭证不被 B 更新抹掉（另一方向的反向覆盖也曾丢凭证致多余催存）
-            mod.mark_store('A')
+            # A 当前代写入凭证不被 B 更新抹掉（另一方向的反向覆盖也曾丢凭证致多余催存）
+            mod.mark_store('A', genA2)
             self.assertTrue(mod.turn_stored('A'))
             mod.mark_prompt('B')
             mod.mark_store('B')
