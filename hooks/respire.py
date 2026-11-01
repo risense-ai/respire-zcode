@@ -388,13 +388,25 @@ def _read_gen_marker(session: str):
         return None
 
 
+POISON = float("inf")  # 失效令牌：标记写失败时写入，任何有限凭证永久不匹配（免催安全关闭）
+
+
+def _poison_marker(session: str) -> bool:
+    """登记失败的安全降级（复核⑤）：把标记写成 +inf。走与正常标记同一写路径——
+    若连它也失败，旧标记无新写者、恢复后首个 mark_prompt 必然重写标记。"""
+    return _write_gen_marker(session, POISON)
+
+
 def mark_prompt(session: str) -> float:
-    """真实用户请求开始：先盲写 gen 标记（当前请求真值，不受锁竞争影响），再尽力更新
-    状态文件、删除一次收尾锁。标记推进后，任何旧凭证（prompt_ts/store_req_ts 旧代）
-    立即失效——登记失败也不会错误免催（复核④①）。"""
+    """真实用户请求开始：先盲写 gen 标记（当前请求真值），再更新状态文件、删一次收尾锁。
+    **标记或状态任一写失败 → 立即写失效令牌（+inf）**：turn_stored 对任何有限旧凭证
+    返回 False——本会话免催优化保持关闭（宁可多催，不凭旧磁盘凭证免催）（复核④①+⑤）。"""
     gen = time.time()
-    _write_gen_marker(session, gen)
-    _map_update(session, {"prompt_ts": gen})
+    if not _write_gen_marker(session, gen):
+        _poison_marker(session)
+    if not _map_update(session, {"prompt_ts": gen}):
+        if _read_gen_marker(session) != gen:
+            _poison_marker(session)  # 状态与标记都未写成功：降级关闭免催
     latch_rearm(session)
     return gen
 
@@ -413,7 +425,7 @@ def turn_stored(session: str) -> bool:
     if not session:
         return False
     marker = _read_gen_marker(session)
-    if marker is None:
+    if marker is None or marker == POISON:  # 缺失/失效令牌：免催关闭（复核⑤）
         return False
     e = _map_load(session)
     if not isinstance(e, dict):

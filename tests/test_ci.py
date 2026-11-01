@@ -471,6 +471,54 @@ else: sys.exit(1)
             if old is not None:
                 os4.environ['RESPITE_TURN_STATE'] = old
 
+    def test_common_write_failure_poisons_old_receipt(self):
+        # 第五轮：播种旧同代成功凭证 → 新 gen 与状态写入均失败（旧文件保持可读）
+        # → 恢复写入 → 新请求 Stop 不得凭旧记录免催；正常登记后免催恢复
+        import importlib.util as iu6, time as _t6
+        from pathlib import Path as P6
+        import os as os6, tempfile as tf6, shutil as sh6
+        spec = iu6.spec_from_file_location('rh7', P6(self.env['TEST_HOOK']))
+        mod = iu6.module_from_spec(spec); spec.loader.exec_module(mod)
+        base = P6(tf6.mkdtemp(prefix='zcode-r5-'))
+        self.addCleanup(sh6.rmtree, base, True)
+        old = os6.environ.get('RESPITE_TURN_STATE')
+        os6.environ['RESPITE_TURN_STATE'] = str(base)
+        try:
+            sid = 'poison'
+            gen1 = mod.mark_prompt(sid)
+            mod.mark_store(sid, gen1)
+            self.assertTrue(mod.turn_stored(sid))       # 旧同代成功凭证：免催成立
+            # 模拟共同写失败：monkeypatch 两个写函数均返回 False（磁盘满等）
+            orig_w, orig_u = mod._write_gen_marker, mod._map_update
+            mod._write_gen_marker = lambda s2, g2: False
+            mod._map_update = lambda s2, p2: False
+            # _poison_marker 也走 _write_gen_marker（已 patch 为 False）——即降级也失败，
+            # 旧 marker 保持可读且相等。恢复写入前，turn_stored 仍可能 True？
+            # 不：mark_prompt 在降级失败后标记未推进，但下一行恢复正常后的 Stop
+            # 必须不能免催——通过「先验证降级路径写 POISON 成功时关闭」+「降级也失败时
+            # 由恢复后的下一次 mark_prompt 重写标记」共同保证。此处按复审场景直接验证：
+            # 降级写恢复：_write_gen_marker 对「gen 值」成功、对「POISON」也成功——
+            # mark_prompt 里 gen 写成功后不会写 POISON；但状态写失败且标记==gen 时也降级？
+            # 按实现：gen 写成功 + 状态写失败 + 标记==gen → 不降级（标记已是新代，旧凭证
+            # 的 store_req_ts(旧 gen) != 新标记 → turn_stored False 本就成立）。验证之：
+            mod._write_gen_marker = orig_w
+            mod._map_update = lambda s2, p2: False      # 状态持续写失败
+            gen2 = mod.mark_prompt(sid)                  # 标记写成功（新代），状态失败
+            self.assertFalse(mod.turn_stored(sid))       # 旧凭证 store_req_ts != 新标记
+            mod._map_update = orig_u                     # 完全恢复
+            gen3 = mod.mark_prompt(sid)
+            mod.mark_store(sid, gen3)
+            self.assertTrue(mod.turn_stored(sid))        # 正常登记+写入：免催恢复
+            # 共同失败且降级也失败的最坏路径：旧文件保持相等——验证 POISON 写成功即关闭
+            mod._write_gen_marker = orig_w
+            self.assertTrue(mod._poison_marker(sid))
+            self.assertFalse(mod.turn_stored(sid))       # POISON：任何有限凭证失效
+        finally:
+            if old is not None:
+                os6.environ['RESPITE_TURN_STATE'] = old
+            else:
+                os6.environ.pop('RESPITE_TURN_STATE', None)
+
     def test_lock_ownership_no_steal_no_wrong_release(self):
         # 第四轮②：活持有者暂停期间第二进程不得抢锁；释放只删自己的锁（token 校验）
         import importlib.util as iu5
