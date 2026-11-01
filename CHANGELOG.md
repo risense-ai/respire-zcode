@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.10 — 2026-11-02 · Windows hook 修复：PowerShell 原生实现，摆脱 Python 依赖
+
+### Fixed
+
+- **Windows 上 hooks 全部无效**：Windows 默认不装 Python，且装了也常有 `python3`/`python` 命中微软商店占位 stub（「Python was not found」非零退出），`python3||python` 回退链双双落空——三个事件（SessionStart/UserPromptSubmit/Stop）每轮必失败。现 Windows 走 **`scripts/respire.ps1`：respire.py 的 PowerShell 5.1 原生移植**（Windows 自带 PowerShell，零额外依赖），直接编排 rsrs 引擎（status/recall/remember/show/list），行为契约与 respire.py 逐条对齐：输出信封、fail-open、Stop 一次收尾锁（latch）、gen 标记/状态文件（同命名、同 sha1 sidkey）、凭证扫描、标题抽取、预算截断、全部环境变量后门。Unix 上 powershell 不存在，自然回落原 `python3||python` 链跑 respire.py（`respire.py` 保留为参考实现与测试靶）。
+- **引擎探测 Windows 对齐**：`Get-Command` 只取 CreateProcess 可直启的 .exe/.cmd/.bat——跳过 pnpm 的 rsrs.ps1 shim（.NET 启不了 PS1 脚本；Python 的 `shutil.which` 走 PATHEXT 从不命中它）；npm 全局安装的 rsrs.cmd shim 经 cmd.exe /c 启动。
+- **PS5 编码/替换三坑**：脚本文件必须 UTF-8 with BOM（无 BOM 会按 ANSI 解码致语法崩坏）；`[Console]::IsInputRedirected` 是属性不是方法；`File.Replace` 第三参传 `$null` 被强转空串抛「路径的形式不合法」——统一走 `Replace-FileAtomic`（显式备份路径 + 删后 Move 降级），gen 标记第二轮起推进正确。
+
+### Changed
+
+- `scripts/validate_plugin.py`：REQUIRED 增列 `scripts/respire.ps1`、`tests/test_wrappers.py`；hook command 断言要求含 PowerShell 包装（保留 `python3||python` 回退链断言）。
+- CI（release.yml check）：三平台新增 `tests/test_wrappers.py`——PS 包装契约测试（假 rsrs 注入，Windows=PS 5.1、Linux/macOS=pwsh 跑同一份脚本）。
+
 ## 0.1.9 — 2026-11-01 · 第六轮终案：取消磁盘凭证免催
 
 ### Changed

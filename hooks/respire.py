@@ -23,7 +23,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.1.9"
+VERSION = "0.1.10"
 
 # 超时窗（秒）：须盖住 rsrs runtime 冷启动（实测 doctor 模型加载 7s+），否则首轮静默、热后即灵
 RECALL_T = 14
@@ -865,9 +865,6 @@ def on_stop(data: dict, cfg: dict, engine):
     # 一次收尾锁：O_EXCL 原子独占；无法落锁（含目录不可写）一律放行——绝不无锁 block
     if not latch_claim(session):
         log_event(cfg, "stop", "once_latch_skip")
-        return ""
-    if turn_stored(session):
-        log_event(cfg, "stop", "stored_turn_skip", "src=receipt")
         return ""
     # 复核整改：移除「全库最新写入时间晚于本轮 prompt 即免催」——引擎侧写入无法归属到
     # 本会话/本请求（其他会话并行写入会误抑制）。免催只认可归属凭证：本层成功写回执。

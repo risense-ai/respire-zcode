@@ -93,7 +93,7 @@ python3 scripts/validate_plugin.py                     # 自检：结构/清单/
 - **JSON 输出契约**：文本 → `{"additionalContext":…}`，Stop 阻塞 → `{"decision":"block","reason":…}`，无输出即无决策
 - **标题档注入**：`recall --titles` 只回 id/score/title，正文交 `show` 按需拉取；`superseded_by` 标「已被取代」
 - **判后即存尊重设计**：落库不带 `--force`，`pending` 候选原样转述给模型决断
-- **`${CLAUDE_PLUGIN_ROOT}` 占位符**：ZCode 运行时替换为插件安装根，跨机器自洽；command 带 `python3 || python` 回退链
+- **`${CLAUDE_PLUGIN_ROOT}` 占位符**：ZCode 运行时替换为插件安装根，跨机器自洽；Windows 走 `scripts/respire.ps1`（respire.py 的 PowerShell 5.1 原生移植，直接编排 rsrs、不依赖 Python；Windows 默认无 Python 且 `python3/python` 常命中商店占位 stub），回落 `python3 || python` 链跑 `hooks/respire.py`（Unix 兜底）
 - **包内自检**：`python3 scripts/validate_plugin.py`（结构/清单/hooks 形状/可编译/fail-open/ZCode 输出契约/敏感扫描），分发前必跑
 
 ## 已知边界

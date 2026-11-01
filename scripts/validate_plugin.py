@@ -56,7 +56,9 @@ REQUIRED = [
     ".claude-plugin/marketplace.json",
     "skills/respire/SKILL.md",
     "tests/test_hooks.sh",
+    "tests/test_wrappers.py",
     "scripts/package.sh",
+    "scripts/respire.ps1",
     "README.md",
     "CHANGELOG.md",
     "LICENSE",
@@ -89,7 +91,8 @@ if manifest:
         ok("manifest skills pointer")
 
 # hooks 规范：事件合法（ZCode 仅七事件，本插件用三）、command 走 ${CLAUDE_PLUGIN_ROOT}、
-# 含 python3||python 回退链；ZCode 不认 commandWindows 字段（schema 未收录，禁带）
+# Windows 先走 PowerShell 包装（scripts/respire.ps1 判断真解释器）再回落 python3||python 链；
+# ZCode 不认 commandWindows 字段（schema 未收录，禁带）
 hooks_cfg = parse_json("hooks/hooks.json")
 if hooks_cfg:
     events = hooks_cfg.get("hooks") or {}
@@ -120,6 +123,8 @@ if hooks_cfg:
                     fail(f"{ev}: command must use ${{CLAUDE_PLUGIN_ROOT}}")
                 if "python3 " not in cmd or " || python " not in cmd:
                     fail(f"{ev}: command should carry python3||python fallback chain")
+                if "scripts/respire.ps1" not in cmd:
+                    fail(f"{ev}: command should lead with the Windows PowerShell wrapper (scripts/respire.ps1)")
                 if "commandWindows" in h:
                     fail(f"{ev}: commandWindows is not a ZCode field; drop it")
                 t = h.get("timeout")

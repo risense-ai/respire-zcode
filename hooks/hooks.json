@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/respire.py\" SessionStart || python \"${CLAUDE_PLUGIN_ROOT}/hooks/respire.py\" SessionStart",
+            "command": "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/scripts/respire.ps1\" SessionStart || python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/respire.py\" SessionStart || python \"${CLAUDE_PLUGIN_ROOT}/hooks/respire.py\" SessionStart",
             "timeout": 20,
             "statusMessage": "respire: injecting memory playbook"
           }
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/respire.py\" UserPromptSubmit || python \"${CLAUDE_PLUGIN_ROOT}/hooks/respire.py\" UserPromptSubmit",
+            "command": "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/scripts/respire.ps1\" UserPromptSubmit || python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/respire.py\" UserPromptSubmit || python \"${CLAUDE_PLUGIN_ROOT}/hooks/respire.py\" UserPromptSubmit",
             "timeout": 20,
             "statusMessage": "respire: recalling memory"
           }
@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/respire.py\" Stop || python \"${CLAUDE_PLUGIN_ROOT}/hooks/respire.py\" Stop",
+            "command": "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/scripts/respire.ps1\" Stop || python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/respire.py\" Stop || python \"${CLAUDE_PLUGIN_ROOT}/hooks/respire.py\" Stop",
             "timeout": 20,
             "statusMessage": "respire: checking storage"
           }

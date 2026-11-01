@@ -39,6 +39,7 @@ jobs:
       - run: python scripts/validate_plugin.py
       - run: python tests/test_ci.py
       - run: python -m unittest discover -s tests -p test_release.py -v
+      - run: python -m unittest discover -s tests -p test_wrappers.py -v
 
   package:
     needs: check
