@@ -23,7 +23,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.1.5"
+VERSION = "0.1.6"
 
 # 超时窗（秒）：须盖住 rsrs runtime 冷启动（实测 doctor 模型加载 7s+），否则首轮静默、热后即灵
 RECALL_T = 14
@@ -268,34 +268,43 @@ def _map_load(session: str) -> dict:
         return {}
 
 
-def _map_lock(session: str, wait_s: float = 1.0, stale_s: float = 5.0):
-    """同会话读改写事务锁：O_CREAT|O_EXCL 独占 lockfile（跨进程）。
-    temp+rename 只防半文件，不把同会话 RMW 变成事务——RMW 必须持锁进行。
-    陈旧锁兜底只看锁文件年龄（mtime > stale_s，持有者已崩），等待超窗则放弃
-    （保守方向：丢更新→多一轮有界收催，不抢活锁）。"""
+def _map_lock(session: str, wait_s: float = 1.0):
+    """同会话读改写事务锁：O_CREAT|O_EXCL 独占 lockfile（跨进程），内容=所有权 token。
+    **不以锁龄推断持有者死亡**（调度/IO 暂停的活持有者会被误抢）——等待超窗一律放弃，
+    放弃是安全的：gen 标记文件（_gen_marker）使未登记的新请求不信任旧凭证。
+    释放只删除内容与自身 token 一致的锁（_release_lock），不会删掉后继持有者。"""
     d = _turn_dir()
     if not d:
         return None
     lp = os.path.join(d, "st_" + _sid_key(session) + ".lock")
+    token = "%d-%d" % (os.getpid(), time.monotonic_ns())
     deadline = time.monotonic() + wait_s
     while True:
         try:
             fd = os.open(lp, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, str(os.getpid()).encode("utf-8"))
+            os.write(fd, token.encode("utf-8"))
             os.close(fd)
-            return lp
+            return lp, token
         except FileExistsError:
-            try:
-                if time.time() - os.path.getmtime(lp) > stale_s:
-                    os.remove(lp)  # 陈旧锁（持有者已崩）：移除后重试
-                    continue
-            except OSError:
-                return None
             if time.monotonic() >= deadline:
                 return None
             time.sleep(0.02)
         except Exception:
             return None
+
+
+def _release_lock(lock):
+    """所有权校验释放：锁文件内容==自身 token 才删除——绝不误删后继持有者的锁。"""
+    if not lock:
+        return
+    lp, token = lock
+    try:
+        with open(lp, encoding="utf-8") as f:
+            if f.read().strip() != token:
+                return  # 已被他人持有（我们超时放弃后他人取得）：不删
+        os.remove(lp)
+    except Exception:
+        pass
 
 
 def _map_update(session: str, patch: dict) -> bool:
@@ -308,7 +317,7 @@ def _map_update(session: str, patch: dict) -> bool:
         return False
     lock = _map_lock(session)
     if lock is None:
-        return False
+        return False  # 等待超窗放弃（不抢锁）：配合 gen 标记，放弃是安全方向
     try:
         entry = _map_load(session)
         entry.update(patch)
@@ -320,10 +329,7 @@ def _map_update(session: str, patch: dict) -> bool:
     except Exception:
         return False
     finally:
-        try:
-            os.remove(lock)
-        except Exception:
-            pass
+        _release_lock(lock)
 
 
 def latch_claim(session: str) -> bool:
@@ -351,10 +357,43 @@ def latch_rearm(session: str) -> None:
         pass
 
 
+def _gen_marker_path(session: str):
+    d = _turn_dir()
+    return os.path.join(d, "st_" + _sid_key(session) + ".gen") if d else None
+
+
+def _write_gen_marker(session: str, gen: float) -> bool:
+    """当前请求代标记：**盲写 temp+rename**（单值覆盖，无读改写→无需事务锁，不会失败于锁竞争）。
+    它是「当前请求是谁」的真值来源：状态文件里的 prompt_ts 只是尽力镜像——
+    新请求即使 _map_update 因锁超窗失败，标记也已推进，旧凭证立即失效。"""
+    p = _gen_marker_path(session)
+    if not p:
+        return False
+    try:
+        tmp = "%s.%d.tmp" % (p, os.getpid())
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(repr(float(gen)))
+        os.replace(tmp, p)
+        return True
+    except Exception:
+        return False
+
+
+def _read_gen_marker(session: str):
+    try:
+        with open(_gen_marker_path(session), encoding="utf-8") as f:
+            v = float(f.read().strip())
+        return v
+    except Exception:
+        return None
+
+
 def mark_prompt(session: str) -> float:
-    """真实用户请求开始：记录请求代 prompt_ts（=gen，返回给写路径绑定）；删除一次收尾锁。
-    latch 是硬保证（删除失败仅多催不重复催）；gen 归属校验防旧请求延迟完成误免催新请求。"""
+    """真实用户请求开始：先盲写 gen 标记（当前请求真值，不受锁竞争影响），再尽力更新
+    状态文件、删除一次收尾锁。标记推进后，任何旧凭证（prompt_ts/store_req_ts 旧代）
+    立即失效——登记失败也不会错误免催（复核④①）。"""
     gen = time.time()
+    _write_gen_marker(session, gen)
     _map_update(session, {"prompt_ts": gen})
     latch_rearm(session)
     return gen
@@ -369,8 +408,12 @@ def mark_store(session: str, gen: float = 0.0):
 
 def turn_stored(session: str) -> bool:
     """本轮（同会话、**凭证归属当前请求代**、新鲜窗内）已有成功写回执。
-    store_req_ts != prompt_ts 的旧代凭证不免催；状态文件失效时保守返回 False。"""
+    真值链：gen 标记（当前请求）→ 状态文件 prompt_ts 必须等于标记（镜像未失真）
+    → store_req_ts 必须等于同一代（凭证归属）。标记缺失/读不到=保守 False。"""
     if not session:
+        return False
+    marker = _read_gen_marker(session)
+    if marker is None:
         return False
     e = _map_load(session)
     if not isinstance(e, dict):
@@ -380,7 +423,7 @@ def turn_stored(session: str) -> bool:
     rq = e.get("store_req_ts")
     if not isinstance(st, (int, float)) or not isinstance(pt, (int, float)):
         return False
-    if rq != pt:  # 凭证不属于当前请求代（旧请求延迟完成/无代标识的陈旧状态）
+    if pt != marker or rq != marker:  # 镜像失真（登记失败被旧快照覆盖）或旧代凭证
         return False
     return st >= pt and time.time() - st < TURN_FRESH_S
 
@@ -409,11 +452,17 @@ def readback(bin_path: str, sid: str, title: str, content: str, cfg: dict, budge
         log_event(cfg, "readback", "no_entry", "", ms)
         return "unavailable"
     summ = doc.get("summary")
-    rid = str(summ.get("id") or "") if isinstance(summ, dict) else ""
-    if rid != sid:  # 返回的是别的条目：不是本条核验通过
-        log_event(cfg, "readback", "mismatch", f"id={rid[:8]}!={sid[:8]}", ms)
+    rid_raw = summ.get("id") if isinstance(summ, dict) else None
+    eid_raw = entry.get("id")
+    # 三方一致：summary.id、entry.id 都必须原生字符串且等于目标 id（任一缺失/错误=mismatch）
+    if not (isinstance(rid_raw, str) and rid_raw == sid and isinstance(eid_raw, str) and eid_raw == sid):
+        log_event(cfg, "readback", "mismatch", "id-triple", ms)
         return "mismatch"
-    et, ec = str(entry.get("title") or ""), str(entry.get("content") or "")
+    et_raw, ec_raw = entry.get("title"), entry.get("content")
+    if not isinstance(et_raw, str) or not isinstance(ec_raw, str):
+        log_event(cfg, "readback", "mismatch", "non-string title/content", ms)
+        return "mismatch"  # 数字/数组/对象正文不强转匹配（42 ≠ "42"）
+    et, ec = et_raw, ec_raw
     bad_title = bool(title) and et != title
     bad_body = content.strip() != ec.strip()  # 完整正文比对（去首尾空白规范化）
     if bad_title or bad_body:
@@ -474,9 +523,10 @@ def do_store(bin_path: str, content: str, cfg: dict, session: str = "", gen: flo
         doc = {}
     status = str(doc.get("status") or "")
     summ = doc.get("summary")
-    sid = str(summ.get("id") or "") if isinstance(summ, dict) else ""
-    if not re.fullmatch(r"[0-9a-fA-F][0-9a-fA-F-]{7,}", sid):
-        sid = ""  # 缺失/畸形 id 一律按不可确认处理，不当有效也不当失败
+    raw_id = summ.get("id") if isinstance(summ, dict) else None
+    # 严格类型：id 必须原生字符串（JSON 数字 12345678 不强转）；白名单=UUID 或 16+ 位 hex
+    sid = raw_id if isinstance(raw_id, str) and re.fullmatch(
+        r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|[0-9a-f]{16,}", raw_id, re.I) else ""
 
     # —— 已写入：ok / warn（warn 也是已提交，只是带警告）——
     if parse_ok and sid and status in ("ok", "warn"):

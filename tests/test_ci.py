@@ -434,6 +434,72 @@ else: sys.exit(1)
             self.assertNotIn('may already be written', out, mode)
             self.assertEqual([a[0] for a in self.recorded()][before:], ['remember', 'list'], mode)
 
+    def test_prompt_registration_failure_invalidates_old_receipt(self):
+        # 第四轮①：旧请求已存（同代新鲜凭证）→ 持事务锁令新 prompt 状态更新失败
+        # → 释放锁 → 新请求 Stop 不得凭旧记录免催（gen 标记已推进，旧凭证立即失效）
+        import importlib.util as iu4, time as _t
+        from pathlib import Path as P4
+        import os as os4
+        spec = iu4.spec_from_file_location('rh5', P4(self.env['TEST_HOOK']))
+        mod = iu4.module_from_spec(spec); spec.loader.exec_module(mod)
+        base = P4(self.env['RESPITE_TURN_STATE'])
+        old = os4.environ.get('RESPITE_TURN_STATE')
+        try:
+            os4.environ['RESPITE_TURN_STATE'] = str(base)
+            base.mkdir(parents=True, exist_ok=True)
+            sid = 'failreg'
+            gen1 = mod.mark_prompt(sid)
+            mod.mark_store(sid, gen1)
+            self.assertTrue(mod.turn_stored(sid))
+            lock = mod._map_lock(sid, wait_s=0.05)
+            self.assertIsNotNone(lock)
+            try:
+                gen2 = mod.mark_prompt(sid)
+                self.assertGreater(gen2, gen1)
+                self.assertFalse(mod.turn_stored(sid))  # 标记已推进：旧凭证失效
+            finally:
+                mod._release_lock(lock)
+            self.assertFalse(mod.turn_stored(sid))
+            mod.mark_store(sid, gen2)
+            # 登记曾失败：pt 仍是 gen1 ≠ marker(gen2)——本轮凭证保守失效（多催方向）
+            self.assertFalse(mod.turn_stored(sid))
+            # 恢复路径：锁已释放，下一请求 gen3 正常登记+写入 → 免催恢复
+            gen3 = mod.mark_prompt(sid)
+            mod.mark_store(sid, gen3)
+            self.assertTrue(mod.turn_stored(sid))
+        finally:
+            if old is not None:
+                os4.environ['RESPITE_TURN_STATE'] = old
+
+    def test_lock_ownership_no_steal_no_wrong_release(self):
+        # 第四轮②：活持有者暂停期间第二进程不得抢锁；释放只删自己的锁（token 校验）
+        import importlib.util as iu5
+        from pathlib import Path as P5
+        import os as os5
+        spec = iu5.spec_from_file_location('rh6', P5(self.env['TEST_HOOK']))
+        mod = iu5.module_from_spec(spec); spec.loader.exec_module(mod)
+        base = P5(self.env['RESPITE_TURN_STATE'])
+        old = os5.environ.get('RESPITE_TURN_STATE')
+        try:
+            os5.environ['RESPITE_TURN_STATE'] = str(base)
+            base.mkdir(parents=True, exist_ok=True)
+            sid = 'locks'
+            first = mod._map_lock(sid, wait_s=0.05)
+            self.assertIsNotNone(first)
+            self.assertIsNone(mod._map_lock(sid, wait_s=0.05))  # 无年龄抢占：等待超窗放弃
+            self.assertIsNone(mod._map_lock(sid, wait_s=0.05))
+            from pathlib import Path as _LP
+            lp = _LP(first[0])
+            lp.write_text('other-holder-token', encoding='utf-8')  # 后继持有者接管
+            mod._release_lock(first)                                # token 不匹配：不删
+            self.assertTrue(lp.exists())
+            lp.write_text(first[1], encoding='utf-8')
+            mod._release_lock(first)
+            self.assertFalse(lp.exists())
+        finally:
+            if old is not None:
+                os5.environ['RESPITE_TURN_STATE'] = old
+
     def test_stale_request_receipt_does_not_suppress_new_request(self):
         # 第三轮复核①：同会话 R1 写暂停 → R2 prompt → R1 完成——R1 凭证带旧 gen，不免催 R2
         import importlib.util as iu2
@@ -491,11 +557,7 @@ else: sys.exit(1)
                 self.assertIsNotNone(lock)
                 self.assertFalse(mod._map_update(sid, {'store_ts': 1.0, 'store_req_ts': stale.get('prompt_ts', 0)}))
             finally:
-                import os
-                try:
-                    os.remove(lock)
-                except OSError:
-                    pass
+                mod._release_lock(lock)  # token 所有权释放
             # 解锁后正常更新可用
             gen_now = mod._map_load(sid).get('prompt_ts')
             self.assertTrue(mod._map_update(sid, {'store_ts': _t.time(), 'store_req_ts': gen_now}))
@@ -558,9 +620,10 @@ else: sys.exit(1)
         os.environ['RESPITE_TURN_STATE'] = str(base)
         try:
             now = _t.time()
-            # A 旧轮：prompt_ts=now-100、store=now-50（同代凭证，仍新鲜）
+            # A 旧轮：prompt_ts=now-100、store=now-50（同代凭证，仍新鲜）+ gen 标记同步
             self.assertTrue(mod._map_update('A', {'prompt_ts': now - 100, 'store_ts': now - 50,
                                                   'store_req_ts': now - 100}))
+            self.assertTrue(mod._write_gen_marker('A', now - 100))
             self.assertTrue(mod.turn_stored('A'))
             a_path = base / ('st_' + mod._sid_key('A') + '.json')
             self.assertTrue(a_path.is_file())
