@@ -17,3 +17,7 @@ hook.log
 .nudge_counter
 .pending_nudge
 spy-calls.log
+.store_turn
+.latch_*
+turn_map.json
+st_*.json
