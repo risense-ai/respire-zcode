@@ -20,3 +20,4 @@ spy-calls.log
 .store_turn
 .latch_*
 turn_map.json
+st_*.json

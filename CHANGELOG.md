@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.4 — 2026-11-01 · 增量复审整改（PR #4 review round 2）
+
+### Fixed
+
+- **共享 turn_map 的跨进程 RMW 回滚（主项）**：删除共享 `turn_map.json`，改为**每会话独立状态文件** `st_<sidkey>.json`（`_map_update`/`_map_load` 只读写本会话文件，temp+rename 原子替换，头 `{"prompt_ts":…,"store_ts":…}`）——不存在跨会话覆盖面，任何交错都不可能回滚别的会话的请求凭证（旧实现 B 持旧快照写回会把 A 的 prompt_ts/store_ts 恢复成旧值，令 A 的 Stop 误认本轮已写而跳过检查）。64 会话收敛逻辑随之删除（每文件独立且极小，运行时产物已 gitignore）。
+- **readback 坏 details 吞回执**：`show` 回读遇非字典 `details`（非空数组/字符串）时曾直接 `.get()` 抛 `AttributeError`，被 fail-open 吞掉后**已写回执（Saved）整个消失**；改为类型防护（`isinstance(det, dict)`）→ 非 dict 一律 `unavailable`，保留 Saved 回执。
+- **monotonic 共享截止时间**：`do_store` 计时全部改用 `time.monotonic()`（deadline = t0 + `RESPITE_HOOK_BUDGET_S`（默认 20s）− 2.5s 输出余量），不受墙钟跳变影响；`remember` 子进程超时不再固定 `STORE_T`，取 `max(1, min(STORE_T, int(剩余)))`；剩余 ≤0 时不发 remember（零引擎调用），直接 unknown 回执。引擎时间戳归属锚点仍用墙钟（引擎侧输出即墙钟）。
+
+### Changed
+
+- 测试：CI 新增 4 项（per-session 状态文件隔离屏障——A 文件在 B 任意写后逐字节不变、A 新 prompt 后旧 store 不再免催、A 凭证不被 B 抹掉；坏 details 两反例——数组/字符串 details → Saved + unavailable 而非空输出；monotonic 预算下慢坏回执零追加调用（remember 超时=剩余预算）；预算耗尽零调用）。
+- `.gitignore` 增 `st_*.json`（每会话状态文件，运行时产物）。
+
 ## 0.1.3 — 2026-11-01 · 维护者复核整改（PR #4 review）
 
 ### Fixed

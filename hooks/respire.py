@@ -23,7 +23,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 
 # 超时窗（秒）：须盖住 rsrs runtime 冷启动（实测 doctor 模型加载 7s+），否则首轮静默、热后即灵
 RECALL_T = 14
@@ -225,8 +225,10 @@ def extract_title(content: str) -> str:
 TURN_FRESH_S = 1800  # 本轮写回执的新鲜度上限：超窗视为陈旧，不再据此免催
 # 一次收尾锁（复核整改）：每会话独立锁文件，O_CREAT|O_EXCL 原子独占——并发 Stop 只有一个能落锁；
 # 锁不设 TTL：只有新的真实请求（mark_prompt）会删除它重新武装；无法落锁（目录不可写等）一律放行，
-# 绝不在没有锁保护的情况下 block。写回执/时刻存于尽力维护的 per-session map（temp+rename 原子替换），
-# map 失败只损失免催优化，不影响一次上限保证。
+# 绝不在没有锁保护的情况下 block。
+# 写回执/时刻存于每会话独立状态文件 st_<sidkey>.json（头 {"prompt_ts":…,"store_ts":…}，temp+rename
+# 原子替换）：每个会话只读写自己的文件，不存在共享 map 的跨进程读改写覆盖面——别的会话的任意写
+# 不可能回滚本会话的请求凭证（复核#1：成功的原子 rename 同样会产生错误行为，故从结构上消灭交错）。
 
 
 def _turn_dir():
@@ -250,14 +252,16 @@ def _latch_path(session: str):
     return os.path.join(d, ".latch_" + _sid_key(session)) if d else None
 
 
-def _map_path():
+def _state_path(session: str):
+    """每会话独立状态文件：st_<sidkey>.json（与锁文件同一目录、同一 sidkey 命名空间）。"""
     d = _turn_dir()
-    return os.path.join(d, "turn_map.json") if d else None
+    return os.path.join(d, "st_" + _sid_key(session) + ".json") if d else None
 
 
-def _map_load() -> dict:
+def _map_load(session: str) -> dict:
+    """读本会话状态文件（{"prompt_ts":…,"store_ts":…}）；缺失/损坏返回 {}，绝不抛。"""
     try:
-        with open(_map_path(), encoding="utf-8") as f:
+        with open(_state_path(session), encoding="utf-8") as f:
             m = json.load(f)
         return m if isinstance(m, dict) else {}
     except Exception:
@@ -265,21 +269,18 @@ def _map_load() -> dict:
 
 
 def _map_update(session: str, patch: dict) -> bool:
-    """合并更新单会话条目（temp+rename 原子替换）；失败返回 False，绝不抛。"""
-    p = _map_path()
+    """合并更新**本会话**状态文件（temp+rename 原子替换）；失败返回 False，绝不抛。
+    与共享 turn_map 的本质区别：读改写只发生在这个会话自己的文件里，不存在跨会话
+    覆盖面——B 会话持旧快照后写回不可能回滚 A 会话的 prompt_ts/store_ts。"""
+    p = _state_path(session)
     if not p or not session:
         return False
     try:
-        m = _map_load()
-        entry = m.get(session) if isinstance(m.get(session), dict) else {}
+        entry = _map_load(session)
         entry.update(patch)
-        m[session] = entry
-        if len(m) > 64:  # 只按数量收敛陈旧会话，不按时间让锁/凭证失效
-            for k in sorted(m, key=lambda k: float(m[k].get("prompt_ts") or 0))[:len(m) - 64]:
-                m.pop(k, None)
         tmp = "%s.%d.tmp" % (p, os.getpid())
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(m, f)
+            json.dump(entry, f)
         os.replace(tmp, p)
         return True
     except Exception:
@@ -323,10 +324,10 @@ def mark_store(session: str):
 
 
 def turn_stored(session: str) -> bool:
-    """本轮（同会话、prompt 之后、新鲜窗内）已有成功写回执。map 失效时保守返回 False。"""
+    """本轮（同会话、prompt 之后、新鲜窗内）已有成功写回执。状态文件失效时保守返回 False。"""
     if not session:
         return False
-    e = _map_load().get(session)
+    e = _map_load(session)
     if not isinstance(e, dict):
         return False
     st = e.get("store_ts")
@@ -341,18 +342,21 @@ def readback(bin_path: str, sid: str, title: str, content: str, cfg: dict, budge
     返回 verified / mismatch / unavailable；超预算（20s hook 窗）直接 unavailable。"""
     if budget_s < 2:
         return "unavailable"
-    t0 = time.time()
+    t0 = time.monotonic()
     try:
         r = run_rsrs(bin_path, ["show", sid, "--json"], min(SHOW_T, max(2, int(budget_s))))
         doc = json.loads(r.stdout) if r.stdout else {}
     except Exception as e:
-        log_event(cfg, "readback", "error", f"{type(e).__name__}", (time.time() - t0) * 1000)
+        log_event(cfg, "readback", "error", f"{type(e).__name__}", (time.monotonic() - t0) * 1000)
         return "unavailable"
-    ms = (time.time() - t0) * 1000
+    ms = (time.monotonic() - t0) * 1000
     if not isinstance(doc, dict) or doc.get("status") != "ok":
         log_event(cfg, "readback", "not_ok", str(doc.get("status") if isinstance(doc, dict) else "?"), ms)
         return "unavailable"
-    entry = (doc.get("details") or {}).get("entry")
+    det = doc.get("details")
+    # 类型防护（复核#2）：details 为非空数组/字符串时曾直接 .get() 抛 AttributeError，
+    # 被 fail-open 吞掉后已写回执（Saved）整个消失——非 dict 一律 unavailable，保留回执。
+    entry = det.get("entry") if isinstance(det, dict) else None
     if not isinstance(entry, dict):
         log_event(cfg, "readback", "no_entry", "", ms)
         return "unavailable"
@@ -371,6 +375,15 @@ def readback(bin_path: str, sid: str, title: str, content: str, cfg: dict, budge
     return "verified"
 
 
+def _hook_budget_s() -> float:
+    """共享 hook 预算（RESPITE_HOOK_BUDGET_S，默认 20s）；坏值/非正值回退默认。"""
+    try:
+        v = float(os.environ.get("RESPITE_HOOK_BUDGET_S") or 20)
+        return v if v > 0 else 20.0
+    except Exception:
+        return 20.0
+
+
 def do_store(bin_path: str, content: str, cfg: dict, session: str = "") -> str:
     """显式落库回执状态机（对齐 CLI 信封语义，审计报告 §7.1/§7.2）：
       ok + summary.id   → 已写入：show 回读核验后回执（verified/mismatch/unavailable 如实标注）
@@ -380,19 +393,28 @@ def do_store(bin_path: str, content: str, cfg: dict, session: str = "") -> str:
       超时/中止          → 结果未知：不查证完不引导重发（回执只允许只读核实：list/show）
       坏信封/无输出      → 结果未知：先只读查库（list 近 3 条），禁止自动重写
       其余明确拒绝态     → fail：转述 errors，不自动重试
+    共享截止时间（复核#3）：remember/回读/只读核实共用一个 **monotonic** deadline
+    （t0 + 预算 − 2.5s 输出余量）——墙钟跳变不影响预算判定；剩余 ≤0 时不再发引擎调用。
     """
     if not content:
         log_event(cfg, "store", "empty_content")
         return ""
     title = extract_title(content) or "respire 快存"
-    t0 = time.time()
+    t0 = time.monotonic()                # 预算计时一律 monotonic（不受墙钟跳变影响）
+    t_wall = time.time()                 # 仅作新条目归属锚点（引擎时间戳是墙钟）
+    deadline = t0 + _hook_budget_s() - 2.5
     r = None
-    try:
-        r = run_rsrs(bin_path, ["remember", content, "--title", title,
-                                "--importance", "important", "--json"], STORE_T)
-    except Exception as e:
-        log_event(cfg, "store", "timeout_or_error", f"{type(e).__name__}: {e}", (time.time() - t0) * 1000)
-    ms = (time.time() - t0) * 1000
+    called = False
+    if deadline - time.monotonic() > 0:  # 剩余 ≤0：不发 remember，直接 unknown 回执
+        called = True
+        try:
+            r = run_rsrs(bin_path, ["remember", content, "--title", title,
+                                    "--importance", "important", "--json"],
+                         max(1, min(STORE_T, int(deadline - time.monotonic()))))
+        except Exception as e:
+            log_event(cfg, "store", "timeout_or_error", f"{type(e).__name__}: {e}",
+                      (time.monotonic() - t0) * 1000)
+    ms = (time.monotonic() - t0) * 1000
     doc, parse_ok = {}, False
     if r is not None and r.stdout and r.stdout.strip():
         try:
@@ -421,8 +443,7 @@ def do_store(bin_path: str, content: str, cfg: dict, session: str = "") -> str:
         else:
             out = f"【respire · stored】Saved: {title} ({sid[:8]})."
             log_event(cfg, "store", "ok", sid[:8], ms)
-        rb = readback(bin_path, sid, title, content, cfg,
-                      (float(os.environ.get("RESPITE_HOOK_BUDGET_S") or 20) - 2.5) - (time.time() - t0))
+        rb = readback(bin_path, sid, title, content, cfg, deadline - time.monotonic())
         if rb == "verified":
             out += " Write verified by read-back (entry exists; title and content match)."
         elif rb == "mismatch":
@@ -467,11 +488,11 @@ def do_store(bin_path: str, content: str, cfg: dict, session: str = "") -> str:
 
     # —— 结果未知：坏信封/无输出（engine 秒回）→ 剩余预算足够才只读查库 ——
     if r is not None:
-        budget_s = float(os.environ.get("RESPITE_HOOK_BUDGET_S") or 20) - 2.5 - (time.time() - t0)
+        budget_s = deadline - time.monotonic()
         hit = None
         if budget_s >= 1.5:
             try:
-                hit = verify_recent_write(bin_path, t0, budget_s)
+                hit = verify_recent_write(bin_path, t_wall, budget_s)
             except Exception:
                 hit = None
         if hit:
@@ -484,6 +505,13 @@ def do_store(bin_path: str, content: str, cfg: dict, session: str = "") -> str:
         return ("【respire · store unknown】The write result is unknown (engine returned an unreadable receipt). "
                 "Verify read-only: rsrs list --limit 3 --json, then rsrs show <id>. Do NOT resend rsrs remember "
                 "for the same fact — resending can duplicate an already-committed write.")
+    # —— 剩余预算 ≤0：remember 根本未发（零引擎调用），直接 unknown 回执 ——
+    if not called:
+        log_event(cfg, "store", "unknown_no_budget", "", ms)
+        return ("【respire · store unknown】The write result is unknown (the shared hook budget was exhausted "
+                "before the engine call — nothing was sent). Verify read-only if needed: rsrs list --limit 3 "
+                "--json, then rsrs show <id>. Do NOT resend rsrs remember for the same fact — resending can "
+                "duplicate an already-committed write.")
     # —— 超时/中止（预算已耗尽，不再发引擎调用）——
     log_event(cfg, "store", "unknown_timeout", "", ms)
     return ("【respire · store unknown】The write result is unknown (engine timed out). Verify read-only: "

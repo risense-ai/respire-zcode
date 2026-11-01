@@ -37,7 +37,7 @@ import json, os, pathlib, runpy, sys
 case = pathlib.Path(os.environ['RESPITE_CONFIG']).resolve().parent
 expected = os.environ['TEST_ENGINE']
 expected_argv = json.loads(os.environ['TEST_EXPECTED_ARGV'])
-assert isinstance(expected_argv, list) and expected_argv
+assert isinstance(expected_argv, list)  # may be empty: zero engine calls are a legal expectation
 for argv in expected_argv:
     assert isinstance(argv, list) and argv[0] == expected
 config = json.loads(pathlib.Path(os.environ['RESPITE_CONFIG']).read_text(encoding="utf-8"))
@@ -101,12 +101,21 @@ elif sub == 'remember':
     if mode == 'ok_junkid': print(json.dumps({'status':'ok','summary':{'id':'zz!!not-hex'}})); sys.exit(0)
     if mode == 'bad_summary': print(json.dumps({'status':'ok','summary':'boom'})); sys.exit(0)
     if mode == 'skip_status': print(json.dumps({'status':'skip','summary':{}})); sys.exit(0)
-    if mode == 'slow_garbage': time.sleep(2.5); print('garbage not json'); sys.exit(0)
+    if mode == 'slow_garbage':
+        time.sleep(float(os.environ.get('STUB_SLEEP', '2.5'))); print('garbage not json'); sys.exit(0)
     print(json.dumps({'status':'ok','summary':{'action':'created','id':'dddddddddddddddd'}}))
 elif sub == 'show':
     if mode == 'show_fail':
         print(json.dumps({'status':'fail','errors':['not found']}))
         sys.exit(2)
+    if mode == 'show_badarr':   # 坏 details 反例：非空数组——旧实现 .get() 抛 AttributeError 吞回执
+        print(json.dumps({'status':'ok','summary':{'id':sys.argv[2],'title':'stub'},
+                          'details':[{}]}))
+        sys.exit(0)
+    if mode == 'show_strdet':   # 坏 details 反例：字符串
+        print(json.dumps({'status':'ok','summary':{'id':sys.argv[2],'title':'stub'},
+                          'details':'not-a-dict'}))
+        sys.exit(0)
     title, content = 'stub', 'stub'
     try:
         for line in open(os.environ['TEST_CALLS'], encoding='utf-8').read().splitlines():
@@ -164,17 +173,20 @@ else: sys.exit(1)
                         PYTHONDONTWRITEBYTECODE='1', PYTHONUTF8='1')
 
     def call(self, prompt='', event='UserPromptSubmit', mode='ok', active=False, every=1,
-             session='s1', fast=False, extra_env=None, list_mode=None):
+             session='s1', fast=False, extra_env=None, list_mode=None, no_calls=False):
         self.config.write_text(json.dumps({'rsrs':str(self.engine), 'session_rules':True,
                                           'store_nudge_every':every}), encoding="utf-8")
         if event == 'Stop':
             args_seq = [['list','--limit','3','--json']]
         elif event == 'SessionStart':
             args_seq = [['status','--json']]
+        elif no_calls:          # 期望零引擎调用（如预算耗尽：remember 根本不发）
+            args_seq = []
         elif prompt.startswith(('记：','store:')):
             content = prompt.replace('：',':',1).split(':',1)[1].strip()
             argv = ['remember',content,'--title',content,'--importance','important','--json']
-            if mode in ('ok','show_fail','show_mismatch','show_wrongid','show_tail'):
+            if mode in ('ok','show_fail','show_mismatch','show_wrongid','show_tail',
+                        'show_badarr','show_strdet'):
                 args_seq = [argv, ['show','dddddddddddddddd','--json']]
             elif mode == 'warn':
                 args_seq = [argv, ['show','eeeeeeeeeeeeeeee','--json']]
@@ -297,6 +309,18 @@ else: sys.exit(1)
         self.assertIn('Read-back unavailable',
                       self.call('store: durable fixture fact', mode='show_fail'))
 
+    def test_store_readback_bad_details_keeps_saved_receipt(self):
+        # 复核2轮#2：show 回读遇非字典 details（非空数组/字符串）曾抛 AttributeError 被
+        # fail-open 吞掉——Saved 回执整个消失。现须保留 Saved + unavailable：
+        # 不是空输出，也不是 did not accept（did not accept 会诱发重发/重复写）。
+        for mode in ('show_badarr', 'show_strdet'):
+            out = self.call('store: bad details fact', mode=mode)
+            self.assertTrue(out.strip(), mode)
+            self.assertIn('Saved:', out, mode)
+            self.assertIn('Read-back unavailable', out, mode)
+            self.assertNotIn('did not accept', out, mode)
+            self.assertEqual([a[0] for a in self.recorded()][-2:], ['remember', 'show'], mode)
+
     def test_store_unknown_receipt_never_demands_resend(self):
         # R10：坏回执 = 结果未知 → 只读核实；绝不当确定失败、绝不引导重发 remember
         out = self.call('store: durable fixture fact', mode='silent')
@@ -378,6 +402,29 @@ else: sys.exit(1)
         self.assertIn('Do NOT resend', out)
         self.assertEqual(len(self.recorded()) - len(before), 1)  # 只有 remember，没有 list
 
+    def test_store_monotonic_deadline_clamps_remember_timeout(self):
+        # 复核2轮#3：共享截止时间改 monotonic，且 remember 子进程超时=剩余预算（不再固定 STORE_T）。
+        # 预算 4s（预留 2.5 → 剩 1.5s）、慢桩睡 6s：remember 在剩余预算处被截断——回执是
+        # "timed out"（旧固定 STORE_T 会等完 6s 拿到垃圾，回执是 "unreadable receipt"）；
+        # 预算随后耗尽，零追加调用。
+        before = self.recorded()
+        out = self.call('store: slow garbage fact', mode='slow_garbage',
+                        extra_env={'RESPITE_HOOK_BUDGET_S': '4', 'STUB_SLEEP': '6'})
+        self.assertIn('store unknown', out)
+        self.assertIn('timed out', out)
+        self.assertIn('Do NOT resend', out)
+        self.assertEqual(len(self.recorded()) - len(before), 1)  # 只有 remember，没有 list
+
+    def test_store_no_remaining_budget_sends_nothing(self):
+        # 复核2轮#3：剩余预算 ≤0（预算 2s < 预留 2.5s）时 remember 根本不发——零引擎调用，
+        # 直接 unknown 回执（只读核实指引 + 禁重发）
+        before = self.recorded()
+        out = self.call('store: no budget fact', extra_env={'RESPITE_HOOK_BUDGET_S': '2'},
+                        no_calls=True)
+        self.assertIn('store unknown', out)
+        self.assertIn('Do NOT resend', out)
+        self.assertEqual(self.recorded(), before)
+
     def test_verify_list_schema_failures_are_not_attribution(self):
         # 坏 schema list（details 非数组 / 无可解析时间戳）→ 不把新条目归属给本次写入
         for mode in ('list_schema', 'list_notimes'):
@@ -404,6 +451,50 @@ else: sys.exit(1)
         self.assertEqual(self.call(event='Stop', session='A'), '')  # A 未再收到新请求：锁仍在
         self.call('session A second request', session='A')          # 只有 A 的新请求重新武装
         self.assertEqual(json.loads(self.call(event='Stop', session='A'))['decision'], 'block')
+
+    def test_turn_state_is_per_session_no_shared_map(self):
+        # 复核2轮#1（屏障）：共享 turn_map 的跨进程 RMW 已从结构上消灭——每会话独立
+        # st_<sidkey>.json。旧交错 B-load(旧) → A-update(新) → B-write 不再可能：
+        # B 的任意写只落 B 自己的文件。断言 A 的状态文件在 B 任意写后逐字节不变、
+        # 共享 map 不再被创建、A 新 prompt 后旧 store 不再免催、A 新凭证不被 B 抹掉。
+        import importlib.util as iu
+        import time as _t
+        spec = iu.spec_from_file_location('rh_ps', self.env['TEST_HOOK'])
+        mod = iu.module_from_spec(spec); spec.loader.exec_module(mod)
+        base = Path(tempfile.mkdtemp(prefix='zcode-psstate-'))
+        self.addCleanup(shutil.rmtree, base, True)
+        old = os.environ.get('RESPITE_TURN_STATE')
+        os.environ['RESPITE_TURN_STATE'] = str(base)
+        try:
+            now = _t.time()
+            # A 旧轮：prompt_ts=now-100、store_ts=now-50（旧轮已写，凭证仍新鲜）
+            self.assertTrue(mod._map_update('A', {'prompt_ts': now - 100, 'store_ts': now - 50}))
+            self.assertTrue(mod.turn_stored('A'))
+            a_path = base / ('st_' + mod._sid_key('A') + '.json')
+            self.assertTrue(a_path.is_file())
+            raw_before = a_path.read_bytes()
+            # B 端任意写（含模拟「B 持旧快照后写回」：B 的写从不触碰 A 的文件）
+            mod.mark_prompt('B')
+            mod.mark_store('B')
+            mod._map_update('B', {'prompt_ts': now - 999, 'store_ts': now - 999})
+            self.assertEqual(a_path.read_bytes(), raw_before)   # A 文件逐字节不变
+            self.assertFalse((base / 'turn_map.json').exists())  # 共享 map 已不存在
+            # A 新真实请求：prompt_ts > store_ts → 旧 store 不再免催；B 的写不影响该判定
+            mod.mark_prompt('A')
+            self.assertFalse(mod.turn_stored('A'))
+            mod.mark_store('B')
+            self.assertFalse(mod.turn_stored('A'))
+            # A 新写入凭证不被 B 更新抹掉（另一方向的反向覆盖也曾丢凭证致多余催存）
+            mod.mark_store('A')
+            self.assertTrue(mod.turn_stored('A'))
+            mod.mark_prompt('B')
+            mod.mark_store('B')
+            self.assertTrue(mod.turn_stored('A'))
+        finally:
+            if old is not None:
+                os.environ['RESPITE_TURN_STATE'] = old
+            else:
+                os.environ.pop('RESPITE_TURN_STATE', None)
 
     def test_latch_survives_age_and_unwritable_state_fails_open(self):
         # 锁不设 TTL：25 小时前的锁仍然占用（只有新 prompt 重新武装）；状态目录不可写 → fail-open 放行
