@@ -284,7 +284,7 @@ STUB_TITLE="$FACT" STUB_CONTENT="$FACT" run_stub UserPromptSubmit "{\"hook_event
 check "其他会话不被本会话凭证免催" "$(run_stub Stop "$STOP_JSON" ok stale)" '含:"decision": "block"'
 reset_state
 STUB_TITLE="$FACT" STUB_CONTENT="$FACT" run_stub UserPromptSubmit "{\"hook_event_name\": \"UserPromptSubmit\", \"prompt\": \"记：$FACT\", \"session_id\": \"selftest\"}" rem_ok >/dev/null
-check "记：成功后本轮凭证免催" "$(run_stub Stop "$STOP_JSON" ok stale)" "空"
+check "记：成功后Stop仍催(磁盘凭证免催已取消)" "$(run_stub Stop "$STOP_JSON" ok stale)" '含:"decision": "block"'
 run_stub UserPromptSubmit '{"hook_event_name": "UserPromptSubmit", "prompt": "new turn after store", "session_id": "selftest"}' ok >/dev/null
 check "下一轮不被上一轮成功写误抑制(应催)" "$(run_stub Stop "$STOP_JSON" ok stale)" '含:"decision": "block"'
 CFG_NUDGE0="$TMP/config-nudge0.json"

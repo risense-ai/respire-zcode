@@ -23,7 +23,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.1.8"
+VERSION = "0.1.9"
 
 # 超时窗（秒）：须盖住 rsrs runtime 冷启动（实测 doctor 模型加载 7s+），否则首轮静默、热后即灵
 RECALL_T = 14
@@ -434,25 +434,14 @@ def mark_store(session: str, gen: float = 0.0):
 
 
 def turn_stored(session: str) -> bool:
-    """本轮（同会话、**凭证归属当前请求代**、新鲜窗内）已有成功写回执。
-    真值链：gen 标记（当前请求）→ 状态文件 prompt_ts 必须等于标记（镜像未失真）
-    → store_req_ts 必须等于同一代（凭证归属）。标记缺失/读不到=保守 False。"""
-    if not session:
-        return False
-    marker = _read_gen_marker(session)
-    if marker is None or marker == POISON:  # 缺失/失效令牌：免催关闭（复核⑤）
-        return False
-    e = _map_load(session)
-    if not isinstance(e, dict):
-        return False
-    st = e.get("store_ts")
-    pt = e.get("prompt_ts")
-    rq = e.get("store_req_ts")
-    if not isinstance(st, (int, float)) or not isinstance(pt, (int, float)):
-        return False
-    if pt != marker or rq != marker:  # 镜像失真（登记失败被旧快照覆盖）或旧代凭证
-        return False
-    return st >= pt and time.time() - st < TURN_FRESH_S
+    """磁盘凭证免催已**取消**（复核⑥终案）：跨事件（UserPromptSubmit→Stop 是两个独立
+    hook 进程）没有可靠的「当前请求」身份可写入磁盘而不依赖任何文件操作成功——
+    unlink/写/锁任一环节的失败-恢复窗口都无法闭合（复核④⑤⑥逐轮证伪）。
+    免催的唯一依据回归 **latch 语义**：latch 在 Stop 的 nudge 时创建、由下一次真实
+    prompt 删除；「已催过」由 latch 存在与否判定（一次收尾锁），本函数恒 False——
+    即 Stop 永远按节流策略催存，绝不凭磁盘旧记录免催。本层「记：」写回执仍然
+    输出给模型（诚实告知已存），但不再影响 Stop 决策。"""
+    return False
 
 
 def readback(bin_path: str, sid: str, title: str, content: str, cfg: dict, budget_s: float):
