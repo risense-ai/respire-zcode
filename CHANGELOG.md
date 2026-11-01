@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.3 — 2026-11-01 · 维护者复核整改（PR #4 review）
+
+### Fixed
+
+- **一次收尾锁重构（复核#1）**：`.store_turn` 单会话状态改为**每会话独立锁文件**（`O_CREAT|O_EXCL` 原子独占——并发 Stop 只有一个能落锁；锁无 TTL，25 小时后仍占用，只有新真实 prompt 删除重新武装；A→B→A 交错不丢锁）；无法落锁（状态目录不可写等）一律放行——绝不无锁 block。prompt_ts/store_ts 存于尽力维护的 per-session map（temp+rename 原子替换，仅按数量收敛），map 失败只损失免催优化。
+- **坏结构 list 不再当成功（复核#2）**：`details` 非数组、或非空却无可解析时间戳 → 按查询失败处理（不归属新条目给本次写入）。
+- **共享 hook 预算（复核#3）**：remember/回读/只读核实共用截止时间（`RESPITE_HOOK_BUDGET_S`，默认 20s，预留 2.5s 输出余量）；慢坏回执后剩余不足直接 unknown，不再追加 list。
+- **回执/回读加固（复核#4）**：`ok`/`warn` 缺有效 id（hex/uuid 白名单校验）、畸形 summary（类型防护不抛异常）、未知 status 一律归 **unknown**（禁重发）；`skip` 明确「引擎按模式拒绝，未写非失败」；`fail` 才断言未接受。回读改为**全量核验**：返回 id 必须=写入 id、标题相等、完整正文相等，才称 verified；否则 mismatch/unavailable 如实标注。
+- **免催凭证可归属化（复核#5）**：移除「引擎全库最新写入晚于 prompt 即免催」（无法归属会话，B 写入会误免催 A）；`/nomem` 仍算新请求（mark 提前），只跳召回不跳收尾重武装。
+
+### Changed
+
+- 测试：CI 30/30（+复核要求反例：缺 id/垃圾 id/坏 summary→unknown、skip 回执、错 id/尾部篡改回读→mismatch、慢坏回执+紧预算→零追加调用、坏 schema list 不归属、A→B→A、锁无 TTL、状态不可写放行、Stop 零引擎查询）；bash 93/0（同步场景 + /nomem 重武装 + 不可写目录放行）。
+
+## 0.1.2 — 2026-11-01
 All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
