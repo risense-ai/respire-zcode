@@ -3,6 +3,24 @@
 All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.2] - 2026-11-01
+
+### Fixed
+
+审计整改（Respire 十插件权威流程审计报告 2026-11-01，ZC-01～ZC-05）：
+
+- **ZC-02 写结果状态机**：「记：」回执不再只认 `status=ok`——`warn`+有效 id 是**已写入带警告**（parent 未解析/post-remember hook 告警），如实回执并附错误摘要，绝不误报「未接受」、绝不引导重发（旧实现会把已提交数据当失败，诱发重复写）。
+- **ZC-03 未知写结果只读核实**：超时/坏回执/无输出归为 **unknown**——回执明令「先 `rsrs list`/`rsrs show` 只读核实、禁止重发 remember」；秒回的坏回执还会自动 `list` 核对是否已落新条并报告可能已写（附只读 id）。旧文案「手动 rsrs remember 核实」已删（重写风险）。
+- **ZC-01 Stop fail-open**：查库 `list` 失败/超时/坏信封/死进程时**直接放行**，不再 block——记忆层故障不得拦主任务结束。
+- **ZC-04 请求级免催凭证**：废除「近 10 分钟任意写入」全局抑制（跨轮误抑制）；改为 turn 状态文件 `.store_turn`——只有**同会话、本轮 prompt 之后**的成功写回执或引擎侧写入才免催；缺凭证时宁可多一轮有界收尾。pending 回执保留候选短 id 与引擎建议动作全量（改＞并＞挂＞存），不再缩成 parent/force 两项（§7.2）。ok/warn 写入后 `show` 写后回读核验（R11），verified/mismatch/unavailable 如实标注。
+- **ZC-05 一次收尾锁**：宿主未带 `stop_hook_active` 时同一请求也至多 block 一次（`.store_turn` 的 stop_block_ts；新 prompt 重新武装）——不再单靠宿主防重位。
+
+### Changed
+
+- 测试大改：CI 桩白名单升级为**有序调用序列**（remember→show 回读链合法化），spy 支持 warn/pending/silent/hang/show_mismatch 模式；新增 8 个契约测试（warn 不误报、pending 转达 merge、unknown 禁重发、fail-open、请求级凭证、会话隔离、一次收尾锁、跨轮不误抑制）；**翻转旧错误期望**（failed→block 曾被当正确结果）。bash 套件换可移植 python 引擎桩（.cmd 包装，修 Windows 下 bash 桩 WinError 193 与 MSYS 路径转换伪故障），基线 54/7 → 89/0。
+- `RESPITE_TEST_FAST=1` 测试后门（全部 CLI 超时压到秒级，供超时分支测试）；`RESPITE_TURN_STATE` 指定轮次状态文件路径。
+- README「记：」/Stop 行为表与设计要点同步新契约；`.gitignore` 增 `.store_turn`。
+
 ## [0.1.1] - 2026-10-31
 
 ### Changed

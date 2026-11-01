@@ -29,22 +29,30 @@ def allowed_process(executable, argv, expected_argv, windows):
 
 # Run the unmodified hook with a subprocess allowlist. A failure cannot silently
 # fall through to a real rsrs executable, even on machines where one is installed.
+# TEST_EXPECTED_ARGV is an ORDERED SEQUENCE of argv lists: every subprocess must
+# match the next expected invocation exactly (store now legitimately chains
+# remember -> show read-back / remember -> list verification).
 LAUNCHER = r'''
 import json, os, pathlib, runpy, sys
 case = pathlib.Path(os.environ['RESPITE_CONFIG']).resolve().parent
 expected = os.environ['TEST_ENGINE']
 expected_argv = json.loads(os.environ['TEST_EXPECTED_ARGV'])
-assert expected_argv[0] == expected
+assert isinstance(expected_argv, list) and expected_argv
+for argv in expected_argv:
+    assert isinstance(argv, list) and argv[0] == expected
 config = json.loads(pathlib.Path(os.environ['RESPITE_CONFIG']).read_text(encoding="utf-8"))
 assert config['rsrs'] == expected and os.access(expected, os.X_OK)
 sys.path.insert(0, str(pathlib.Path(os.environ['TEST_HOOK']).parents[1] / 'tests'))
 from test_ci import allowed_process
+state = {'next': 0}
 def audit(event, args):
     if event == 'subprocess.Popen':
         executable, argv, cwd, env = args
-        if not allowed_process(executable, argv, expected_argv, os.name == 'nt'):
+        index = state['next']
+        if index >= len(expected_argv) or not allowed_process(executable, argv, expected_argv[index], os.name == 'nt'):
             pathlib.Path(os.environ['TEST_DENIED']).write_text('unexpected subprocess')
             raise SystemExit(91)
+        state['next'] += 1
     elif event.startswith('socket.') or event in ('os.system', 'os.posix_spawn', 'os.exec'):
         pathlib.Path(os.environ['TEST_DENIED']).write_text('unexpected external action')
         raise SystemExit(92)
@@ -63,17 +71,48 @@ class CredentialGuard(unittest.TestCase):
         self.calls = self.case / 'calls.jsonl'
         self.log = self.case / 'hook.log'
         self.denied = self.case / 'denied'
-        self.spy.write_text(r'''import json, os, sys, datetime
+        self.spy.write_text(r'''import json, os, sys, datetime, time
 with open(os.environ['TEST_CALLS'], 'a', encoding='utf-8') as f:
     f.write(json.dumps(sys.argv[1:]) + '\n')
 sub = sys.argv[1]
 mode = os.environ.get('STUB_MODE', 'ok')
 if mode == 'dead': sys.exit(7)
 if mode == 'malformed': print('not json'); sys.exit(0)
+if mode == 'hang': time.sleep(30)
 if sub == 'recall':
     print(json.dumps({'status':'ok','details':[{'id':'cccccccccccccccc','title':'spy','score':0.9}]}))
 elif sub == 'remember':
-    print(json.dumps({'status':'ok','summary':{'id':'dddddddddddddddd'}}))
+    if mode == 'warn':
+        print(json.dumps({'status':'warn','summary':{'action':'created','id':'eeeeeeeeeeeeeeee'},
+                          'errors':['parent (cause) cannot be resolved; stored independently']}))
+        sys.exit(2)
+    if mode == 'pending':
+        print(json.dumps({'status':'pending','summary':{'state':'candidates','written':False},
+                          'items':[{'name':'aaaabbbb','status':'pending',
+                                    'value':'similarity=88% title=stub candidate',
+                                    'action':'merge or attach'}],
+                          'actions':['rsrs remember "<combined content>" --merge-ids "aaaabbbb"',
+                                     'rsrs remember "<content>" --parent <candidate id>',
+                                     'rsrs remember "<content>" --force to write as new entry']}))
+        sys.exit(2)
+    if mode == 'silent': sys.exit(0)
+    print(json.dumps({'status':'ok','summary':{'action':'created','id':'dddddddddddddddd'}}))
+elif sub == 'show':
+    if mode == 'show_fail':
+        print(json.dumps({'status':'fail','errors':['not found']}))
+        sys.exit(2)
+    title, content = 'stub', 'stub'
+    try:
+        for line in open(os.environ['TEST_CALLS'], encoding='utf-8').read().splitlines():
+            call = json.loads(line)
+            if call and call[0] == 'remember':
+                content, title = call[1], call[3]
+    except Exception:
+        pass
+    if mode == 'show_mismatch':
+        title = title + ' (drifted)'
+    print(json.dumps({'status':'ok','summary':{'id':sys.argv[2],'title':title},
+                      'details':{'entry':{'id':sys.argv[2],'title':title,'content':content}}}))
 elif sub == 'status':
     print(json.dumps({'status':'ok','summary':{'session':{'has_token':True,'user':'stub'},'local_total':42}}))
 elif sub == 'list':
@@ -106,25 +145,38 @@ else: sys.exit(1)
                         TEST_DENIED=str(self.denied), TEST_HOOK=str(ROOT / 'hooks/respire.py'),
                         PYTHONDONTWRITEBYTECODE='1', PYTHONUTF8='1')
 
-    def call(self, prompt='', event='UserPromptSubmit', mode='ok', active=False, every=1):
+    def call(self, prompt='', event='UserPromptSubmit', mode='ok', active=False, every=1,
+             session='s1', fast=False):
         self.config.write_text(json.dumps({'rsrs':str(self.engine), 'session_rules':True,
                                           'store_nudge_every':every}), encoding="utf-8")
         if event == 'Stop':
-            args = ['list','--limit','3','--json']
+            args_seq = [['list','--limit','3','--json']]
         elif event == 'SessionStart':
-            args = ['status','--json']
+            args_seq = [['status','--json']]
         elif prompt.startswith(('记：','store:')):
             content = prompt.replace('：',':',1).split(':',1)[1].strip()
-            args = ['remember',content,'--title',content,'--importance','important','--json']
+            argv = ['remember',content,'--title',content,'--importance','important','--json']
+            if mode in ('ok','show_fail','show_mismatch'):
+                args_seq = [argv, ['show','dddddddddddddddd','--json']]
+            elif mode == 'warn':
+                args_seq = [argv, ['show','eeeeeeeeeeeeeeee','--json']]
+            elif mode == 'silent':   # 未知回执 → 只读核实 list
+                args_seq = [argv, ['list','--limit','3','--json']]
+            else:                    # pending / hang：不再有后续引擎调用
+                args_seq = [argv]
         else:
-            args = ['recall',prompt,'--limit','5','--titles','--json']
-        env = dict(self.env, TEST_EXPECTED_ARGV=json.dumps([str(self.engine)] + args),
+            args_seq = [['recall',prompt,'--limit','5','--titles','--json']]
+        env = dict(self.env, TEST_EXPECTED_ARGV=json.dumps([[str(self.engine)] + a for a in args_seq]),
                    TEST_EVENT=event, STUB_MODE=mode)
+        if fast:
+            env['RESPITE_TEST_FAST'] = '1'
+        payload = {'prompt':prompt,'hook_event_name':event,'stop_hook_active':active}
+        if session is not None:
+            payload['session_id'] = session
         result = subprocess.run([sys.executable, str(self.launcher)],
-                                input=json.dumps({'prompt':prompt,'hook_event_name':event,
-                                                  'stop_hook_active':active}), text=True,
+                                input=json.dumps(payload), text=True,
                                 encoding='utf-8', capture_output=True, env=env,
-                                cwd=self.case, timeout=20)
+                                cwd=self.case, timeout=40)
         self.assertFalse(self.denied.exists(), 'Isolation denied an external action')
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout
@@ -189,7 +241,56 @@ else: sys.exit(1)
         out = self.call('store: durable fixture fact')
         self.assertIn('respire · stored', out)
         self.assertIn('retitle dddddddd', out)
-        self.assertEqual(self.recorded()[-1][0], 'remember')
+        self.assertIn('verified by read-back', out)
+        self.assertEqual([args[0] for args in self.recorded()], ['remember', 'show'])
+
+    def test_store_warn_is_written_not_refused(self):
+        # CLI 契约：status=warn + 有效 id = 已提交但有警告（parent 未解析等）——
+        # 不得误报「未接受」，更不得引导重发（重复写风险）
+        out = self.call('store: durable fixture fact', mode='warn')
+        self.assertIn('Saved with warnings', out)
+        self.assertIn('parent (cause) cannot be resolved', out)
+        self.assertIn('retitle eeeeeeee', out)
+        self.assertNotIn('did not accept', out)
+        self.assertEqual([args[0] for args in self.recorded()], ['remember', 'show'])
+
+    def test_store_pending_relays_candidates_and_actions(self):
+        # §7.2：pending 保留候选（含短 id）与引擎建议动作（改＞并＞挂＞存），不得缩成 parent/force 两项
+        out = self.call('store: durable fixture fact', mode='pending')
+        self.assertIn('store pending', out)
+        self.assertIn('nothing was written', out)
+        self.assertIn('[aaaabbbb]', out)
+        self.assertIn('similarity=88% title=stub candidate', out)
+        self.assertIn('merge or attach', out)
+        self.assertIn('--merge-ids', out)
+        self.assertIn('--force', out)
+        self.assertEqual([args[0] for args in self.recorded()], ['remember'])
+
+    def test_store_readback_states(self):
+        # R11 写后核验：verified / mismatch / unavailable 三态都如实进回执
+        self.assertIn('verified by read-back', self.call('store: durable fixture fact'))
+        self.assertIn('DIFFERENT title/content',
+                      self.call('store: durable fixture fact', mode='show_mismatch'))
+        self.assertIn('Read-back unavailable',
+                      self.call('store: durable fixture fact', mode='show_fail'))
+
+    def test_store_unknown_receipt_never_demands_resend(self):
+        # R10：坏回执 = 结果未知 → 只读核实；绝不当确定失败、绝不引导重发 remember
+        out = self.call('store: durable fixture fact', mode='silent')
+        self.assertIn('store unknown', out)
+        self.assertIn('Do NOT resend', out)
+        self.assertIn('rsrs list --limit 3', out)
+        self.assertNotIn('did not accept', out)
+        self.assertEqual([args[0] for args in self.recorded()], ['remember', 'list'])
+
+    def test_store_timeout_is_unknown_and_makes_no_further_calls(self):
+        # 超时 = 结果未知：回执只允许只读核实指引，不再发引擎调用（预算已耗尽）
+        before = self.recorded()
+        out = self.call('store: durable fixture fact', mode='hang', fast=True)
+        self.assertIn('store unknown', out)
+        self.assertIn('timed out', out)
+        self.assertIn('Do NOT resend', out)
+        self.assertEqual(len(self.recorded()) - len(before), 1)
 
     def test_stop_deny_and_reentry_zero_calls(self):
         out = json.loads(self.call(event='Stop'))
@@ -200,30 +301,59 @@ else: sys.exit(1)
         self.assertEqual(self.recorded(), before)
         self.assertEqual((self.case / 'nudge').read_text(encoding="utf-8"), count)
 
-    def test_stop_every_three_and_disabled_zero_calls(self):
+    def test_stop_every_third_request_and_disabled_zero_calls(self):
         for number in range(1, 7):
-            out = self.call(event='Stop', every=3)
+            self.call(f'ordinary input {number}')          # 每轮都是新请求：重新武装收尾预算
+            raw = self.call(event='Stop', every=3)
             if number in (3, 6):
-                self.assertEqual(json.loads(out)['decision'], 'block')
+                self.assertEqual(json.loads(raw)['decision'], 'block')
             else:
-                self.assertEqual(out, '')
-        self.assertEqual(len(self.recorded()), 2)
+                self.assertEqual(raw, '')
+        self.assertEqual([a[0] for a in self.recorded()].count('list'), 2)
         before = self.recorded()
         self.assertEqual(self.call(event='Stop', every=0), '')
         self.assertEqual(self.recorded(), before)
         self.assertEqual((self.case / 'nudge').read_text(encoding="utf-8"), '6')
 
-    def test_stop_recent_stale_and_failed_query(self):
+    def test_stop_engine_turn_bounded_and_fail_open(self):
+        # ZC-01/ZC-04：无请求凭证时 fresh 引擎写入不免催（不做跨轮误抑制）
+        self.assertEqual(json.loads(self.call(event='Stop', mode='recent'))['decision'], 'block')
+        # 请求之后引擎有写入（agent 自行 rsrs remember）→ 免催
+        self.call('ordinary input')
         self.assertEqual(self.call(event='Stop', mode='recent'), '')
-        for mode in ('ok', 'failed'):
-            self.assertEqual(json.loads(self.call(event='Stop', mode=mode))
-                             ['decision'], 'block')
+        # 查询失败/坏信封 → fail-open 放行，且每次至多一次查询
+        before = self.recorded()
+        self.assertEqual(self.call(event='Stop', mode='failed'), '')
+        self.assertEqual(self.call(event='Stop', mode='malformed'), '')
+        self.assertEqual(len(self.recorded()) - len(before), 2)
 
     def test_stop_after_hook_store_does_not_query_engine(self):
         self.call('store: durable fixture fact')
         before = self.recorded()
         self.assertEqual(self.call(event='Stop'), '')
         self.assertEqual(self.recorded(), before)
+
+    def test_turn_receipt_suppression_is_request_scoped(self):
+        # T18：只有「同会话、本轮 prompt 之后」的成功写回执才免催；新请求不被旧轮抑制
+        self.call('store: durable fixture fact')
+        self.assertEqual(self.call(event='Stop'), '')
+        self.call('another ordinary input without storing')   # 新请求（未存）
+        self.assertEqual(json.loads(self.call(event='Stop'))['decision'], 'block')
+
+    def test_stop_once_per_request_latch(self):
+        # ZC-05：宿主未带 stop_hook_active 时，同一请求也至多催一次；新请求重新武装
+        self.call('ordinary input')
+        self.assertEqual(json.loads(self.call(event='Stop'))['decision'], 'block')
+        before = self.recorded()
+        self.assertEqual(self.call(event='Stop'), '')
+        self.assertEqual(self.recorded(), before)
+        self.call('fresh request after wrap-up')
+        self.assertEqual(json.loads(self.call(event='Stop'))['decision'], 'block')
+
+    def test_receipt_suppression_is_session_scoped(self):
+        # 会话隔离：A 会话的写回执不免 B 会话的催存
+        self.call('store: durable fixture fact', session='a')
+        self.assertEqual(json.loads(self.call(event='Stop', session='b'))['decision'], 'block')
 
     def test_malformed_spy_cannot_pass_positive_control(self):
         self.positive_control()

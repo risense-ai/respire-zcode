@@ -17,3 +17,4 @@ hook.log
 .nudge_counter
 .pending_nudge
 spy-calls.log
+.store_turn

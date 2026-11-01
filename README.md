@@ -42,8 +42,8 @@ python3 scripts/validate_plugin.py                     # 自检：结构/清单/
 | --- | --- |
 | `SessionStart` | 注入记忆层简则（何时翻忆、如何落库、红线）；**一次探测三态**——未登录附注册引导、库空（<10 条）附首日存料与导入引导、缺语义模型附**可选**装法；常态零打扰 |
 | `UserPromptSubmit` | 自动 `rsrs recall --titles`：**标题档注入**——只给分数＋8 位短 id＋标题，正文由 agent `rsrs show <id>` 按需取；默认**直出不过滤**，噪音边界＝rsrs skip 门＋limit 5＋标题档 |
-| `prompt` 以「记：」「存：」「remember:」开头 | 直接 `rsrs remember … --importance important` 落库并回执；判后即存判为相似时**不写入**、回执转述候选（`--parent` 挂靠或 `--force` 直写），由模型决断；回执硬约束 AI 抽「主语＋动作＋结果」事实句 `retitle` 替换暂拟题 |
-| `Stop`（AI 干完活） | **存储检查**：`{"decision":"block","reason":…}` 续跑一轮，提示模型把本轮新的**事实/决定/约定/教训/踩坑**分条 `rsrs remember`；闲聊无新事实则直接结束。防循环：续跑轮 stdin 带 `stop_hook_active=true` 即放行（ZCode 自身限续跑至多三次，本层一次即止）；节流 `store_nudge_every`（默认 1=每轮，N=每 N 轮，0=关）；近 10 分钟本库有过落库（问引擎 `list` 取最近 `updated_at`）则不再催 |
+| `prompt` 以「记：」「存：」「remember:」开头 | 直接 `rsrs remember … --importance important` 落库并回执，**回执按结果状态机**：`ok`/`warn` → **已写入**（warn 附引擎警告如 parent 未解析——不误报失败、不引导重发），随后 `show` 写后回读核验（verified / mismatch / unavailable 如实标注）；`pending` → **未写入**，转述候选（带短 id）＋引擎建议动作（改＞并＞挂＞存全量转达，先 `show` 读候选正文再决断）；超时/坏回执 → **结果未知**，回执只允许只读核实（`rsrs list`/`rsrs show`）并**明令禁止重发**（重复写风险）。回执硬约束 AI 抽「主语＋动作＋结果」事实句 `retitle` 替换暂拟题 |
+| `Stop`（AI 干完活） | **存储检查**：`{"decision":"block","reason":…}` 续跑一轮，提示模型把本轮新的**事实/决定/约定/教训/踩坑**分条 `rsrs remember`；闲聊无新事实则直接结束。**每个真实请求至多催一次**：续跑轮 `stop_hook_active=true` 放行 ＋ 本层请求级一次收尾锁双保险（新 prompt 重新武装）。**免催凭证按请求判断，不按全局时间窗**：同会话、本轮 prompt 之后的成功写回执（`ok`/`warn`+id）或引擎侧写入（`list` 最近 `updated_at` 晚于本轮 prompt）才免催——旧的「近 10 分钟任意写入」跨轮误抑制已移除；缺会话/轮次凭证时宁可多一轮有界收尾。**查库失败/超时/坏信封一律 fail-open 放行**：记忆层故障不得拦主任务结束。节流 `store_nudge_every`（默认 1=每轮，N=每 N 轮，0=关） |
 | `prompt` 以 `/nomem` 开头 | 本轮跳过召回 |
 | `skills/respire` | 按需加载的操作法（recall/remember/show/forget/sync 与信封解析要点）；**注意技能只是说明书，动作全由钩子驱动** |
 
@@ -88,7 +88,8 @@ python3 scripts/validate_plugin.py                     # 自检：结构/清单/
 
 ## 设计要点
 
-- **fail-open**：hook 任何异常 → 空 stdout + `exit 0`，永不拦会话；失败必留痕于 hook.log
+- **fail-open**：hook 任何异常 → 空 stdout + `exit 0`，永不拦会话；失败必留痕于 hook.log。**Stop 查库失败同样放行**——记忆层故障不强迫主任务续跑
+- **写结果状态机**：`ok`/`warn`=已写（warn 带警告）、`pending`=未写待决、超时/坏回执=未知（只读核实、禁重发）、其余=明确拒绝；与 CLI 信封语义一一对应，绝不把「已写带警告」当失败、不把「未知」当失败引导重写
 - **JSON 输出契约**：文本 → `{"additionalContext":…}`，Stop 阻塞 → `{"decision":"block","reason":…}`，无输出即无决策
 - **标题档注入**：`recall --titles` 只回 id/score/title，正文交 `show` 按需拉取；`superseded_by` 标「已被取代」
 - **判后即存尊重设计**：落库不带 `--force`，`pending` 候选原样转述给模型决断
