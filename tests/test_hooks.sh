@@ -114,7 +114,9 @@ check "probe失败含未注册分支" "$(RESPITE_FAKE_PROBE_FAIL=1 run SessionSt
 STUB_DIR="$TMP"; TMPN="$(cygpath -m "$TMP" 2>/dev/null || printf '%s' "$TMP")"
 cat > "$STUB_DIR/stub_engine.py" <<'PYEOF'
 import json, os, sys, time
-sub = sys.argv[1] if len(sys.argv) > 1 else ""
+sub = sys.argv[1]
+with open(os.environ["STUB_CALLS"], "a", encoding="utf-8") as calls:
+    calls.write(sub + "\n") if len(sys.argv) > 1 else ""
 mode = os.environ.get("STUB_MODE", "ok")
 list_mode = os.environ.get("STUB_LIST", mode)
 if sub == "list":
@@ -185,43 +187,25 @@ printf '{"session_rules": true, "rsrs": "%s"}' "$STUB_ENGINE" > "$CFG_STUB"
 run_stub() {
   local ev="$1" payload="$2" sm="${3:-ok}" sl="${4:-}" sess="${5:-selftest}"
   printf '%s' "$payload" | STUB_MODE="$sm" STUB_LIST="$sl" RESPITE_TEST_FAST=1 \
-    RESPITE_CONFIG="$CFG_STUB" RESPITE_LOG="$TMP/hook.log" RESPITE_NUDGE_STATE="$TMP/nudge" \
+    STUB_CALLS="$TMPN/engine-calls" RESPITE_CONFIG="$CFG_STUB" RESPITE_LOG="$TMP/hook.log" RESPITE_NUDGE_STATE="$TMP/nudge" \
     RESPITE_TURN_STATE="$TMP/turnstate" "$PY3" "$ROOT/hooks/respire.py" "$ev"
 }
 STOP_JSON='{"hook_event_name": "Stop", "stop_hook_active": false, "session_id": "selftest"}'
 reset_state() { rm -rf "$TMP/turnstate" "$TMP/nudge"; }
 
-# ---- 写回执状态机（§7.1/§7.2 契约；全走桩，零真库依赖） ----
+# ---- Explicit prefixes stay pending; legacy receipt helper checks are in test_ci.py. ----
 FACT="fixed stub fact sentence one."
 reset_state
-out=$(STUB_TITLE="$FACT" STUB_CONTENT="$FACT" run_stub UserPromptSubmit "{\"hook_event_name\": \"UserPromptSubmit\", \"prompt\": \"记：$FACT\", \"session_id\": \"selftest\"}" rem_ok)
-check "ok 写入回执含短 id" "$out" "含:(dddddddd)"
-check "ok 写入回读核验标注" "$out" "含:verified by read-back"
-check "ok 回执约束AI抽事实句retitle" "$out" "含:rsrs retitle dddddddd"
-out=$(STUB_TITLE="$FACT" STUB_CONTENT="$FACT" run_stub UserPromptSubmit "{\"hook_event_name\": \"UserPromptSubmit\", \"prompt\": \"记：$FACT\", \"session_id\": \"selftest\"}" rem_warn)
-check "warn 已写入不误报失败" "$out" "含:Saved with warnings"
-check "warn 回执附引擎警告摘要" "$out" "含:parent (cause) cannot be resolved"
-check "warn 不引导重发" "$out" "不含:did not accept"
-check "warn 仍给 retitle 精修入口" "$out" "含:retitle eeeeeeee"
-out=$(run_stub UserPromptSubmit "{\"hook_event_name\": \"UserPromptSubmit\", \"prompt\": \"记：$FACT\", \"session_id\": \"selftest\"}" rem_pend)
-check "pending 明示未写入" "$out" "含:nothing was written"
-check "pending 转述候选带短id" "$out" "含:[aaaabbbb]"
-check "pending 保留建议动作merge" "$out" "含:--merge-ids"
-check "pending 保留建议动作force" "$out" "含:--force"
-out=$(run_stub UserPromptSubmit "{\"hook_event_name\": \"UserPromptSubmit\", \"prompt\": \"记：$FACT\", \"session_id\": \"selftest\"}" rem_silent stale)
-check "坏回执归为unknown" "$out" "含:store unknown"
-check "unknown 只读核实指引" "$out" "含:rsrs list --limit 3"
-check "unknown 禁止重发" "$out" "含:Do NOT resend"
-check "unknown 不误报失败" "$out" "不含:did not accept"
-out=$(run_stub UserPromptSubmit "{\"hook_event_name\": \"UserPromptSubmit\", \"prompt\": \"记：$FACT\", \"session_id\": \"selftest\"}" rem_silent fresh)
-check "unknown+新条目报告可能已写" "$out" "含:may already be written"
-check "unknown+新条目给出只读id" "$out" "含:rsrs show ffffffff"
-out=$(run_stub UserPromptSubmit "{\"hook_event_name\": \"UserPromptSubmit\", \"prompt\": \"记：$FACT\", \"session_id\": \"selftest\"}" rem_slow)
-check "超时归为unknown" "$out" "含:store unknown"
-check "超时回执禁重发" "$out" "含:Do NOT resend"
-check "超时不引导手动重发remember" "$out" "不含:run rsrs remember manually"
-out=$(STUB_TITLE="$FACT" STUB_CONTENT="$FACT" run_stub UserPromptSubmit "{\"hook_event_name\": \"UserPromptSubmit\", \"prompt\": \"记：$FACT\", \"session_id\": \"selftest\"}" rem_showbad)
-check "回读不一致如实标注" "$out" "含:DIFFERENT title/content"
+for mode in rem_ok rem_warn rem_pend rem_silent rem_slow rem_showbad; do
+  out=$(run_stub UserPromptSubmit "{\"hook_event_name\": \"UserPromptSubmit\", \"prompt\": \"记：$FACT\", \"session_id\": \"selftest\"}" "$mode")
+  check "prefix pending ($mode)" "$out" "含:store pending"
+  check "prefix not written ($mode)" "$out" "含:nothing was written"
+  check "prefix policy ($mode)" "$out" "含:rsrs prompt"
+  check "prefix bodies ($mode)" "$out" "含:rsrs show"
+  check "prefix placement ($mode)" "$out" "含:update > merge > attach > new"
+  check "prefix parent required ($mode)" "$out" "含:remain pending"
+  check "prefix zero engine calls ($mode)" "$([ -f "$TMP/engine-calls" ] && echo CALLED || echo NONE)" "含:NONE"
+done
 
 # ---- Stop 存储检查（新契约：fail-open + 请求级凭证 + 一次收尾锁；每场景独立 reset 状态） ----
 STOP_JSON='{"hook_event_name": "Stop", "stop_hook_active": false, "session_id": "selftest"}'
@@ -263,7 +247,7 @@ check "fail-open 留痕(旧查库路径已移除)" "$(grep -q 'once_latch_skip' 
 # 状态目录被同名文件挡住 → 无法落锁 → 放行（绝不无锁 block）
 rm -rf "$TMP/not-a-dir"; BLOCKER="$TMP/not-a-dir"; printf 'x' > "$BLOCKER"
 reset_state
-check "状态目录不可写时放行(绝不无锁block)" "$(printf '%s' '{"hook_event_name": "Stop", "stop_hook_active": false, "session_id": "selftest"}' | RESPITE_CONFIG="$CFG_STUB" RESPITE_LOG="$TMP/hook.log" RESPITE_NUDGE_STATE="$TMP/nudge" RESPITE_TURN_STATE="$(cygpath -m "$TMP" 2>/dev/null || printf '%s' "$TMP")/not-a-dir/sub" "$PY3" "$ROOT/hooks/respire.py" Stop)" "空"
+check "状态目录不可写时放行(绝不无锁block)" "$(printf '%s' '{"hook_event_name": "Stop", "stop_hook_active": false, "session_id": "selftest"}' | STUB_CALLS="$TMPN/engine-calls" RESPITE_CONFIG="$CFG_STUB" RESPITE_LOG="$TMP/hook.log" RESPITE_NUDGE_STATE="$TMP/nudge" RESPITE_TURN_STATE="$(cygpath -m "$TMP" 2>/dev/null || printf '%s' "$TMP")/not-a-dir/sub" "$PY3" "$ROOT/hooks/respire.py" Stop)" "空"
 rm -f "$BLOCKER"
 # 锁不设 TTL：25 小时前的锁仍占用，只有新 prompt 重新武装
 reset_state

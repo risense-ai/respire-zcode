@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.11 — 2026-11-02
+
+- Explicit memory prefixes now return pending without writing, in Python and native PowerShell.
+- Require policy, same-topic candidate bodies, and update/merge/attach decisions before storing. New important records need a reviewed reasonable parent; otherwise stay pending without force or importance downgrade.
+- Preserve unknown-result no-retry checks through the legacy receipt helper; update existing prefix checks to require zero engine calls.
+
 ## 0.1.10 — 2026-11-02 · Windows hook 修复：PowerShell 原生实现，摆脱 Python 依赖
 
 ### Fixed

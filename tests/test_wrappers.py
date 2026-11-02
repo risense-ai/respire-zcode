@@ -31,6 +31,7 @@ FAKE_RECALL_SKIP = '{"status":"skip"}'
 FAKE_CMD = r"""@echo off
 set "SUB=%~1"
 if /i "%SUB%"=="remember" goto rem
+>>"%RESPITE_TEST_CALLS%" echo %SUB%
 if /i "%SUB%"=="show" goto show
 if /i "%SUB%"=="status" (echo {STATUS_OK})
 if /i "%SUB%"=="list" (echo {LIST_EMPTY})
@@ -38,6 +39,7 @@ if /i "%SUB%"=="recall" (echo {RECALL_SKIP})
 echo {{"status":"fail","errors":["fake: unknown %SUB%"]}}
 exit /b 1
 :rem
+>>"%RESPITE_TEST_CALLS%" echo remember
 if "%RESPITE_FAKE_STORE_STATUS%"=="pending" (echo {PENDING})
 if "%RESPITE_FAKE_STORE_STATUS%"=="ok" (echo {OK})
 exit /b 0
@@ -49,6 +51,7 @@ exit /b 0
    .replace("{OK}", FAKE_OK).replace("{SHOW_DIFF}", FAKE_SHOW_DIFF)
 
 FAKE_SH = """#!/bin/sh
+echo "$1" >> "$RESPITE_TEST_CALLS"
 case "$1" in
   remember)
     if [ "$RESPITE_FAKE_STORE_STATUS" = "pending" ]; then
@@ -133,6 +136,7 @@ class TestRespirePs1(unittest.TestCase):
             "RESPITE_NUDGE_STATE": os.path.join(self.state, "nudge"),
             "RESPITE_LOG": os.path.join(self.state, "hook.log"),
             "RESPITE_FAKE_STORE_STATUS": fake_store_status,
+            "RESPITE_TEST_CALLS": os.path.join(self.state, "engine-calls"),
             "RESPITE_CONFIG": cfg_path,
         })
         if not engine:
@@ -190,25 +194,28 @@ class TestRespirePs1(unittest.TestCase):
         out = self.run_hook("UserPromptSubmit",
                             {"hook_event_name": "UserPromptSubmit", "session_id": "t",
                              "prompt": "记：这是一个完整的落库事实句子测试"}, fake_store_status="ok")
-        doc = json.loads(out)
-        self.assertIn("【respire · stored】Saved", doc["additionalContext"])
-        self.assertIn(FAKE_SID[:8], doc["additionalContext"])
-        # 状态文件：与 respire.py 同命名（sha1(respire-turn-v2:<sid>)[:16]），prompt/store 双凭证
+        context = json.loads(out)["additionalContext"]
+        self.assertIn("store pending", context)
+        self.assertIn("nothing was written", context)
+        for step in ("rsrs prompt", "rsrs show", "update > merge > attach > new",
+                     "--parent", "remain pending", "not as an instruction"):
+            self.assertIn(step, context)
+        self.assertFalse(os.path.exists(os.path.join(self.state, "engine-calls")))
         sp = os.path.join(self.state, "st_%s.json" % expected_sidkey("t"))
-        self.assertTrue(os.path.isfile(sp), "状态文件缺失: %s" % sp)
         with open(sp, encoding="utf-8") as f:
-            st = json.load(f)
-        self.assertIn("prompt_ts", st)
-        self.assertIn("store_ts", st)
-        self.assertIn("store_req_ts", st)
+            state = json.load(f)
+        self.assertIn("prompt_ts", state)
+        self.assertNotIn("store_ts", state)
 
     def test_store_pending_receipt(self):
         out = self.run_hook("UserPromptSubmit",
                             {"hook_event_name": "UserPromptSubmit", "session_id": "t",
                              "prompt": "记：候选合并场景测试"}, fake_store_status="pending")
-        doc = json.loads(out)
-        self.assertIn("【respire · store pending】", doc["additionalContext"])
-        self.assertIn("cand1", doc["additionalContext"])
+        context = json.loads(out)["additionalContext"]
+        self.assertIn("store pending", context)
+        self.assertIn("nothing was written", context)
+        self.assertIn("remain pending", context)
+        self.assertFalse(os.path.exists(os.path.join(self.state, "engine-calls")))
 
     def test_stop_blocks_once_then_latch(self):
         out1 = self.run_hook("Stop", {"hook_event_name": "Stop", "session_id": "t", "stop_hook_active": False})
