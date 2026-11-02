@@ -39,7 +39,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|mcp__respire__memory_remember",
         "hooks": [
           {
             "type": "command",

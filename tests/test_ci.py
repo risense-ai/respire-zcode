@@ -114,6 +114,12 @@ elif sub == 'remember':
         time.sleep(float(os.environ.get('STUB_SLEEP', '2.5'))); print('garbage not json'); sys.exit(0)
     print(json.dumps({'status':'ok','summary':{'action':'created','id':'dddddddddddddddd'}}))
 elif sub == 'show':
+    if mode == 'show_parented_bad' and sys.argv[2] == 'aaaaaaaaaaaaaaaa':
+        print(json.dumps({'status':'fail'})); sys.exit(2)
+    if mode in ('show_parented','show_parented_bad'):
+        print(json.dumps({'status':'ok','summary':{'id':sys.argv[2]},
+                          'details':{'entry':{'id':sys.argv[2],'parent_id':'aaaaaaaaaaaaaaaa'}}}))
+        sys.exit(0)
     if mode == 'show_badsummary':
         print(json.dumps({'status':'ok','summary':{'id':'9999999999999999'},
                           'details':{'entry':{'id':sys.argv[2]}}}))
@@ -190,7 +196,8 @@ else: sys.exit(1)
         self.config.write_text(json.dumps({'rsrs':str(self.engine), 'session_rules':True,
                                           'store_nudge_every':every}), encoding="utf-8")
         if event == 'PreToolUse':
-            args_seq = [['--client-only','show',guard_parent,'--json']] if guard_parent else []
+            parents = guard_parent if isinstance(guard_parent, list) else [guard_parent] if guard_parent else []
+            args_seq = [['--client-only','show',p,'--json'] for p in parents]
         elif event == 'Stop':
             args_seq = [['list','--limit','3','--json']]
         elif event == 'SessionStart':
@@ -309,6 +316,12 @@ else: sys.exit(1)
             'rsrs remember "fact" --importance important',
             'X=1 rsrs remember "fact" --importance important',
             '>out.log rsrs remember fact --importance important --force',
+            'rsrs >out.log remember fact --importance important --force',
+            'echo $(rsrs >out.log remember fact --importance important --force)',
+            'bash -c "rsrs >out.log remember fact --importance important --force"',
+            'rsrs --json >out.log remember fact --importance important --force',
+            'rsrs remember fact --merge-ids dddddddddddddddd',
+            'rsrs remember fact --importance trivial --merge-ids dddddddddddddddd',
             '>out.log 2>err.log rsrs remember fact --importance important --force',
             'echo $(rsrs remember fact --importance important --force)',
             'echo "$(rsrs remember fact --importance important --force)"',
@@ -339,6 +352,7 @@ else: sys.exit(1)
                         'rsrs recall remember --titles --json',
                         'rsrs --client-only --json recall remember --titles',
                         'rsrs --json --client-only candidates remember',
+                        'rsrs --model-task-id audit --progress-id progress recall remember --json',
                         'npx rsrs recall remember --json',
                         'bash -c "rsrs recall remember --json"',
                         "echo '$(rsrs remember fact --importance important --force)'",
@@ -346,13 +360,25 @@ else: sys.exit(1)
                         'rsrs remember "diary" --importance trivial',
                         'rsrs remember "fact" --help'):
             self.assertEqual(self.call(event='PreToolUse', guard_command=command), '', command)
-        for prefix in ('--client-only --json', '--json --client-only'):
+        for prefix in ('--client-only --json', '--json --client-only', '--model-task-id audit --progress-id progress', '--progress-id=progress --model-task-id=audit --json'):
             denied = json.loads(self.call(event='PreToolUse', guard_command='rsrs ' + prefix + ' remember "fact" --importance important'))
             self.assertEqual(denied['hookSpecificOutput']['permissionDecision'], 'deny')
             self.assertEqual(self.call(event='PreToolUse', guard_command='rsrs ' + prefix + ' remember "fact" --importance important --parent dddddddddddddddd', guard_parent='dddddddddddddddd'), '')
-        metadata = ' --project Respire --tags plugin,parent --type context --summary "candidate summary" --source-refs "[]" --valid-until 2027-01-01T00:00:00.000Z --review-at 2027-01-01T00:00:00.000Z --artifact "{}" --computer TB16P --emotion -1 --supersedes dddddddddddddddd --see-also dddddddddddddddd'
+        metadata = ' --model-task-id audit --progress-id progress --project Respire --tags plugin,parent --type context --summary "candidate summary" --source-refs "[]" --valid-until 2027-01-01T00:00:00.000Z --review-at 2027-01-01T00:00:00.000Z --artifact "{}" --computer TB16P --emotion -1 --supersedes dddddddddddddddd --see-also dddddddddddddddd'
         for suffix in (metadata, ' --clear-summary --clear-source-refs --clear-valid-until --clear-review-at --clear-artifact'):
             self.assertEqual(self.call(event='PreToolUse', guard_command='>out.log rsrs remember fact --importance important --parent dddddddddddddddd' + suffix, guard_parent='dddddddddddddddd'), '')
+        for command in ('rsrs >out.log remember fact --importance important --parent dddddddddddddddd',
+                        'rsrs remember ">" --importance important --parent dddddddddddddddd',
+                        'rsrs remember fact --merge-ids eeeeeeeeeeeeeeee --parent dddddddddddddddd'):
+            self.assertEqual(self.call(event='PreToolUse', guard_command=command, guard_parent='dddddddddddddddd'), '')
+        command = 'rsrs update dddddddddddddddd --importance important --content "updated fact"'
+        denied = json.loads(self.call(event='PreToolUse', guard_command=command, guard_parent='dddddddddddddddd'))
+        self.assertEqual(denied['hookSpecificOutput']['permissionDecision'], 'deny')
+        self.assertIn('attach', denied['hookSpecificOutput']['permissionDecisionReason'])
+        self.assertEqual(self.call(event='PreToolUse', guard_command=command, guard_parent=['dddddddddddddddd','aaaaaaaaaaaaaaaa'], mode='show_parented'), '')
+        denied = json.loads(self.call(event='PreToolUse', guard_command=command, guard_parent=['dddddddddddddddd','aaaaaaaaaaaaaaaa'], mode='show_parented_bad'))
+        self.assertEqual(denied['hookSpecificOutput']['permissionDecision'], 'deny')
+        self.assertEqual(self.call(event='PreToolUse', guard_command='rsrs update dddddddddddddddd --importance trivial'), '')
         command = 'cd repo && rsrs remember "fact" --title "title" --importance=important --parent=dddddddddddddddd 2>&1 | head -80'
         self.assertEqual(self.call(event='PreToolUse', guard_command=command,
                                    guard_parent='dddddddddddddddd'), '')
@@ -364,6 +390,10 @@ else: sys.exit(1)
                                   extra_env={'RESPITE_HOOK_BUDGET_S':'1'}))
         self.assertEqual(out['hookSpecificOutput']['permissionDecision'], 'deny')
         self.assertEqual(self.call(event='PreToolUse', guard_command=command, guard_tool='Read'), '')
+        self.assertEqual(self.call(event='PreToolUse', guard_command=command, guard_tool='mcp__other__memory_remember'), '')
+        denied = json.loads(self.call(event='PreToolUse', guard_tool='mcp__respire__memory_remember'))
+        self.assertEqual(denied['hookSpecificOutput']['permissionDecision'], 'deny')
+        self.assertIn('target store', denied['hookSpecificOutput']['permissionDecisionReason'])
 
     def test_store_warn_is_written_not_refused(self):
         # CLI 契约：status=warn + 有效 id = 已提交但有警告（parent 未解析等）——

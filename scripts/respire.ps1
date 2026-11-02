@@ -905,11 +905,34 @@ function Get-BashTokens([string]$command) {
 
 function Get-RememberSegments([string]$command) {
     $tokens = @(Get-BashTokens $command)
+    function Get-CleanCommandTokens([object[]]$parts) {
+        $clean=New-Object 'System.Collections.Generic.List[object]'
+        $redirects=@('>','>>','>&','<','<&')
+        for ($i=0; $i -lt $parts.Count; $i++) {
+            if ($parts[$i].Value -match '^\d+$' -and $i+1 -lt $parts.Count -and $parts[$i+1].Operator -and $parts[$i+1].Value -cin $redirects) { $i++ }
+            if ($parts[$i].Operator -and $parts[$i].Value -cin $redirects) {
+                if ($i+1 -ge $parts.Count -or $parts[$i+1].Operator -or $parts[$i+1].Dynamic) { throw 'opaque redirection' }
+                $i++; continue
+            }
+            $clean.Add($parts[$i])
+        }
+        return $clean.ToArray()
+    }
+    function Get-SubcommandIndex([object[]]$parts, [int]$start) {
+        while ($start -lt $parts.Count) {
+            $value=$parts[$start].Value
+            if ($value -cin @('--client-only','--json')) { $start++ }
+            elseif (($value -split '=',2)[0] -cin @('--model-task-id','--progress-id')) {
+                if ($value.Contains('=')) { $start++ } else { $start+=2 }
+            } else { break }
+        }
+        return $start
+    }
     function Test-LiteralWrite([object[]]$parts, [int]$start) {
+        $parts=@(Get-CleanCommandTokens @($parts | Select-Object -Skip $start)); $start=0
         if ($start -ge $parts.Count -or $parts[$start].Value -notmatch '(?i)(?:^|[/\\])rsrs(?:\.(?:exe|cmd|ps1))?$') { return $false }
-        $start++
-        while ($start -lt $parts.Count -and $parts[$start].Value -cin @('--client-only','--json')) { $start++ }
-        return ($start -lt $parts.Count -and $parts[$start].Value -ceq 'remember')
+        $start=Get-SubcommandIndex $parts ($start+1)
+        return ($start -lt $parts.Count -and $parts[$start].Value -cin @('remember','update'))
     }
     $streams = New-Object 'System.Collections.Generic.List[object]'
     $streams.Add($tokens)
@@ -940,23 +963,20 @@ function Get-RememberSegments([string]$command) {
     $writes = New-Object 'System.Collections.Generic.List[object]'
     $wrapped = @('bash','sh','cmd','cmd.exe','powershell','powershell.exe','pwsh','pwsh.exe','python','python3','py','node','env','command','exec','npx','npm','sudo','timeout','(','{','if','then','do','while','for','case','!')
     foreach ($part in $segments) {
-        while ($part.Count) {
-            if ($part.Count -gt 1 -and $part[0].Value -match '^\d+$' -and $part[1].Operator) { $part=@($part | Select-Object -Skip 1) }
-            if ($part[0].Operator -and $part[0].Value -cin @('>','>>','>&','<','<&')) {
-                if ($part.Count -lt 3) { throw 'missing redirected command' }
-                $part=@($part | Select-Object -Skip 2)
-            } else { break }
-        }
+        $part=@(Get-CleanCommandTokens $part)
         if (-not $part.Count) { continue }
         $values = @($part | ForEach-Object { $_.Value })
         $first = ($values[0] -replace '\\','/').Split('/')[-1].ToLowerInvariant()
         if ($values[0] -notmatch '(?i)(?:^|[/\\])rsrs(?:\.(?:exe|cmd|ps1))?$') {
-            if ($part[0].Dynamic -and $values -ccontains 'remember' -and $command -match '(?i)\brsrs\b') { throw 'dynamic memory executable' }
+            if ($part[0].Operator) {
+                for ($j=0; $j -lt $part.Count; $j++) { if (Test-LiteralWrite $part $j) { throw 'unsupported memory command prefix' } }
+            }
+            if ($part[0].Dynamic -and ($values -ccontains 'remember' -or $values -ccontains 'update') -and $command -match '(?i)\brsrs\b') { throw 'dynamic memory executable' }
             if ($first -in $wrapped -or $values[0] -match '^[A-Za-z_][A-Za-z0-9_]*=') {
                 $candidates=New-Object 'System.Collections.Generic.List[object]'
                 $candidates.Add($part)
                 foreach ($value in $values) {
-                    if ($value -match '(?i)rsrs' -and $value.Contains('remember')) { $candidates.Add(@(Get-BashTokens $value)) }
+                    if ($value -match '(?i)rsrs' -and ($value.Contains('remember') -or $value.Contains('update'))) { $candidates.Add(@(Get-BashTokens $value)) }
                 }
                 foreach ($candidate in $candidates) {
                     for ($j=0; $j -lt $candidate.Count; $j++) {
@@ -966,35 +986,32 @@ function Get-RememberSegments([string]$command) {
             }
             continue
         }
-        $index = 1
-        while ($index -lt $values.Count -and $values[$index] -cin @('--client-only','--json')) { $index++ }
-        if ($index -ge $values.Count -or $values[$index] -cne 'remember') {
-            if ($index -lt $values.Count -and ($part[$index].Dynamic -or $values[$index].StartsWith('-')) -and [Array]::IndexOf($values,'remember',$index + 1) -ge 0) { throw 'unsupported memory command prefix' }
+        $index=Get-SubcommandIndex $part 1
+        if ($index -ge $values.Count -or $values[$index] -cnotin @('remember','update')) {
+            if ($index -lt $values.Count -and ($part[$index].Dynamic -or $part[$index].Operator -or $values[$index].StartsWith('-')) -and ([Array]::IndexOf($values,'remember',$index+1) -ge 0 -or [Array]::IndexOf($values,'update',$index+1) -ge 0)) { throw 'unsupported memory command prefix' }
             continue
         }
+        for ($j=0; $j -le $index; $j++) { if ($part[$j].Dynamic -or $part[$j].Operator) { throw 'dynamic memory command prefix' } }
         $argsList = New-Object 'System.Collections.Generic.List[string]'
         for ($i = $index + 1; $i -lt $part.Count; $i++) {
             $token = $part[$i]; $value = $token.Value
-            if ($value -match '^\d+$' -and $i + 1 -lt $part.Count -and $part[$i + 1].Operator -and $part[$i + 1].Value -in @('>','>>','>&','<','<&')) { continue }
-            if ($token.Operator -and $value -in @('>','>>','>&','<','<&')) {
-                if ($i + 1 -ge $part.Count) { throw 'missing redirection target' }
-                $i++; continue
-            }
             if ($token.Operator -or $token.Dynamic) { throw 'dynamic memory write' }
             $argsList.Add($value)
         }
-        $writes.Add([pscustomobject]@{ Arguments=$argsList.ToArray() })
+        $writes.Add([pscustomobject]@{ Action=$values[$index]; Arguments=$argsList.ToArray() })
     }
     return $writes.ToArray()
 }
 
-function Get-MemoryWriteParent([string[]]$arguments) {
+function Get-MemoryWriteParent([string[]]$arguments, [string]$action='remember') {
     if ($arguments -ccontains '--help' -or $arguments -ccontains '-h') { return $null }
+    $target=$null
+    if ($action -ceq 'update') { if ($arguments.Count) { $target=$arguments[0] }; $arguments=@($arguments | Select-Object -Skip 1) }
     $importance='trivial'; $parent=$null; $seen=@{}
     for ($i=0; $i -lt $arguments.Count; $i++) {
         $pair=$arguments[$i] -split '=',2; $name=$pair[0]
         if ($name -cin @('--force','-f')) { throw 'force' }
-        if ($name -cin @('--importance','-i','--parent','-p','--title','--merge-ids','--type','--summary','--source-refs','--valid-until','--review-at','--artifact','--tags','--project','--computer','--emotion','--supersedes','--see-also')) {
+        if ($name -cin @('--importance','-i','--parent','-p','--title','--merge-ids','--type','--summary','--source-refs','--valid-until','--review-at','--artifact','--tags','--project','--computer','--emotion','--supersedes','--see-also','--model-task-id','--progress-id','--content','--kind')) {
             $key=$name
             if ($key -ceq '-i') { $key='--importance' }; if ($key -ceq '-p') { $key='--parent' }
             if ($seen.ContainsKey($key)) { throw 'duplicate option' }; $seen[$key]=$true
@@ -1008,9 +1025,14 @@ function Get-MemoryWriteParent([string[]]$arguments) {
             elseif ($key -ceq '--parent') { $parent=$value }
         } elseif ($name.StartsWith('-') -and $name -cnotin @('--json','--client-only','--clear-summary','--clear-source-refs','--clear-valid-until','--clear-review-at','--clear-artifact')) { throw 'unsupported write option' }
     }
+    if ($action -ceq 'update') {
+        if ($importance -cne 'important') { return $null }
+        if ($target -isnot [string] -or $target -cnotmatch '^(?:[a-fA-F0-9]{8,64}|[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12})$') { throw 'invalid update target' }
+        return @{target=$target}
+    }
     if ($importance -cnotin @('important','trivial')) { throw 'unknown importance' }
     if ($null -ne $parent -and $parent -cnotmatch '^(?:[a-fA-F0-9]{8,64}|[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12})$') { throw 'invalid parent' }
-    if ($importance -ceq 'important' -and $null -eq $parent) { throw 'missing parent' }
+    if (($importance -ceq 'important' -or $seen.ContainsKey('--merge-ids')) -and $null -eq $parent) { throw 'missing parent' }
     return $parent
 }
 
@@ -1018,25 +1040,53 @@ function New-GuardDeny([string]$reason) {
     return @{ hookSpecificOutput=@{ hookEventName='PreToolUse'; permissionDecision='deny'; permissionDecisionReason=$reason } }
 }
 
+function Get-GuardEntry([string]$engine, [string]$requested, [double]$deadline) {
+    $remaining=$deadline-(Get-NowEpoch)
+    if (-not $engine -or $remaining -lt 1) { return $null }
+    try {
+        $result=Invoke-Rsrs $engine @('--client-only','show',$requested,'--json') ([int][Math]::Floor([Math]::Min($T_SHOW,$remaining)))
+        if ($null -eq $result -or $result.returncode -ne 0 -or -not $result.stdout.TrimStart().StartsWith('{')) { return $null }
+        $doc=ConvertFrom-Json $result.stdout
+        if ($doc -isnot [pscustomobject] -or $doc.details -isnot [pscustomobject] -or $doc.details.entry -isnot [pscustomobject] -or $doc.summary -isnot [pscustomobject]) { return $null }
+        $identifier=$doc.details.entry.id
+        $summaryId=$doc.summary.id
+        if ($doc.status -is [string] -and $doc.status -ceq 'ok' -and $identifier -is [string] -and $summaryId -is [string] -and $summaryId -ceq $identifier -and $identifier -cmatch '^(?:[a-fA-F0-9]{16,64}|[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12})$' -and $identifier.StartsWith($requested,[StringComparison]::OrdinalIgnoreCase)) { return $doc.details.entry }
+    } catch { }
+    return $null
+}
+
 function Invoke-PreToolUse([hashtable]$data, [hashtable]$cfg, [string]$engine) {
+    if ([string]$data['tool_name'] -ieq 'mcp__respire__memory_remember') {
+        Write-HookLog $cfg 'pretool' 'deny_unbound_mcp'
+        return New-GuardDeny 'Respire blocked this MCP memory write because its target store cannot be bound to the local read-only parent check. Nothing was authorized. Use one explicit rsrs remember command with a verified parent; keep placement pending if unavailable. DO NOT switch tools to bypass this guard.'
+    }
     if ([string]$data['tool_name'] -ine 'Bash') { return '' }
     $inputValue=$data['tool_input']; $command=$null
     if ($null -ne $inputValue) { try { $command=$inputValue.command } catch { } }
     if ($command -isnot [string]) { return '' }
     try { $writes=@(Get-RememberSegments $command) }
     catch {
-        if ($command -match '(?i)\brsrs(?:\.(?:exe|cmd|ps1))?\b' -and $command -match '\bremember\b') {
+        if ($command -match '(?i)\brsrs(?:\.(?:exe|cmd|ps1))?\b' -and $command -match '\b(?:remember|update)\b') {
             Write-HookLog $cfg 'pretool' 'deny_unparsed'
-            return New-GuardDeny 'Respire blocked an opaque or dynamic memory write. Use one explicit literal rsrs remember command; do not use shell wrappers or substitutions.'
+            return New-GuardDeny 'Respire blocked an opaque or dynamic memory write. Use one explicit literal rsrs command; do not use shell wrappers or substitutions.'
         }
         return ''
     }
     $verified=@{}; $deadline=(Get-NowEpoch) + [Math]::Max(0,[Math]::Min((Get-HookBudgetS)-2,16))
     foreach ($write in $writes) {
-        try { $parent=Get-MemoryWriteParent $write.Arguments }
+        try { $parent=Get-MemoryWriteParent $write.Arguments $write.Action }
         catch {
             Write-HookLog $cfg 'pretool' 'deny_arguments'
-            return New-GuardDeny 'Respire blocked this memory write. DO NOT use --force. An important record requires one non-empty literal --parent ID. Read policy and candidate bodies; update or merge first, and report missing placement as pending instead of writing at the root.'
+            return New-GuardDeny 'Respire blocked this memory write. DO NOT use --force. Every merge and important remember requires one non-empty literal --parent ID. Read policy and candidate bodies; update or merge first, and report missing placement as pending instead of writing at the root.'
+        }
+        if ($parent -is [hashtable]) {
+            $entry=Get-GuardEntry $engine $parent.target $deadline
+            $parent=$null
+            if ($null -ne $entry) { $parent=$entry.parent_id }
+            if ($parent -isnot [string] -or $parent -cnotmatch '^(?:[a-fA-F0-9]{8,64}|[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12})$') {
+                Write-HookLog $cfg 'pretool' 'deny_update_placement'
+                return New-GuardDeny 'Respire blocked promotion to important because the target has no verified existing parent. Read the target and candidates, attach it to a reasonable verified parent first, then retry the update explicitly. Nothing was authorized; keep placement pending if attachment cannot be completed.'
+            }
         }
         if ($null -eq $parent -or $verified.ContainsKey($parent)) { continue }
         $remaining=$deadline-(Get-NowEpoch)
@@ -1044,17 +1094,7 @@ function Invoke-PreToolUse([hashtable]$data, [hashtable]$cfg, [string]$engine) {
             Write-HookLog $cfg 'pretool' 'deny_parent_unavailable'
             return New-GuardDeny 'Respire could not verify the parent without changing engine state. Nothing was written; keep placement pending.'
         }
-        $valid=$false
-        try {
-            $result=Invoke-Rsrs $engine @('--client-only','show',$parent,'--json') ([int][Math]::Floor([Math]::Min($T_SHOW,$remaining)))
-            if ($null -ne $result -and $result.returncode -eq 0) {
-                $doc=ConvertFrom-Json $result.stdout
-                $identifier=$doc.details.entry.id
-                $summaryId=$doc.summary.id
-                $valid=($doc.status -ceq 'ok' -and $identifier -is [string] -and $summaryId -is [string] -and $summaryId -ceq $identifier -and $identifier -cmatch '^(?:[a-fA-F0-9]{16,64}|[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12})$' -and $identifier.StartsWith($parent,[StringComparison]::OrdinalIgnoreCase))
-            }
-        } catch { $valid=$false }
-        if (-not $valid) {
+        if ($null -eq (Get-GuardEntry $engine $parent $deadline)) {
             Write-HookLog $cfg 'pretool' 'deny_parent_unverified'
             return New-GuardDeny 'Respire blocked this write because the literal parent could not be verified by a read-only show. Report missing placement as pending; do not force, guess a parent, or change engine mode.'
         }
@@ -1242,7 +1282,7 @@ try {
         $out = ''
         try {
             $command = $data['tool_input'].command
-            if ($ev -eq 'PreToolUse' -and [string]$data['tool_name'] -ieq 'Bash' -and $command -is [string] -and $command -match '(?i)\brsrs\b' -and $command -match '\bremember\b') {
+            if ($ev -eq 'PreToolUse' -and ([string]$data['tool_name'] -ieq 'mcp__respire__memory_remember' -or ([string]$data['tool_name'] -ieq 'Bash' -and $command -is [string] -and $command -match '(?i)\brsrs\b' -and $command -match '\b(?:remember|update)\b'))) {
                 $out = New-GuardDeny 'Respire could not safely validate this memory write. Nothing was authorized; keep placement pending and use one explicit literal command.'
             }
         } catch { }

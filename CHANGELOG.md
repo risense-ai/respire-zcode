@@ -2,6 +2,9 @@
 
 ## 0.1.12 — 2026-11-02
 
+- Require an explicit verified parent for every remember merge. Before an important update, read back the target and verify its existing parent; deny an unparented promotion until attachment. Normalize redirections before executable and subcommand recognition.
+- Consume current global task/progress ID options before locating the CLI subcommand. Deny the known MCP memory writer because its target store cannot be bound to local parent verification.
+
 - Add a PreToolUse Bash write guard in Python and native PowerShell. Deny important remembers without a non-empty literal parent, any force flag, and recognized opaque or dynamic memory writes. Inspect every supported compound-command segment.
 - Verify supplied parent IDs with read-only `--client-only show` before allowing a write; failures stay blocked without starting runtime or changing engine mode.
 - Keep compliant hooks silent and denied hooks at exit 0 so interpreter fallback cannot swallow a deny. The guard does not prove prior model reading or semantic placement quality.

@@ -9,7 +9,9 @@ Plugin behavior: automatic recall is read-only. Explicit memory prefixes return 
 
 ## Write guard boundary
 
-PreToolUse checks recognized Bash `rsrs remember` calls before execution. It denies important records without a non-empty literal parent ID, any force option, and recognized dynamic or opaque write wrappers. Parent verification uses read-only `--client-only show`; unavailable engines, timeouts, malformed receipts, or unconfirmed IDs are denied. DO NOT start runtime, change modes, or switch tools to evade this denial. Use one explicit literal command or report placement pending.
+The known `mcp__respire__memory_remember` tool is denied because its target store cannot be bound to the local parent check. Use one explicit CLI command; DO NOT use another tool to bypass a denial. Unknown MCP tools are outside this guard.
+
+PreToolUse checks recognized Bash `rsrs remember` calls and updates promoting a record to important before execution. Every remember merge MUST provide a literal parent even when importance is omitted or trivial. An important update MUST pass read-only target inspection and verification of its existing non-empty parent; otherwise attach first and keep the update pending. It denies important records without a non-empty literal parent ID, any force option, and recognized dynamic or opaque write wrappers. Parent verification uses read-only `--client-only show`; unavailable engines, timeouts, malformed receipts, or unconfirmed IDs are denied. DO NOT start runtime, change modes, or switch tools to evade this denial. Use one explicit literal command or report placement pending.
 
 A successful guard check proves only that a parent ID exists. It does not prove that you previously read the record or that the parent is semantically appropriate. You MUST still follow the full candidate-review workflow. Trivial diary records need no parent, but force is still prohibited. This guard is not a general barrier for unknown aliases, arbitrary scripts, custom tools, or other processes.
 

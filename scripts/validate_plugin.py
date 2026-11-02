@@ -100,8 +100,8 @@ if hooks_cfg:
         fail(f"unexpected events: {sorted(set(events) - {'SessionStart', 'UserPromptSubmit', 'PreToolUse', 'Stop'})}")
     else:
         ok("hook events subset")
-    if "PreToolUse" not in events or events["PreToolUse"][0].get("matcher") != "Bash":
-        fail("PreToolUse must guard Bash commands")
+    if "PreToolUse" not in events or events["PreToolUse"][0].get("matcher") != "Bash|mcp__respire__memory_remember":
+        fail("PreToolUse must guard Bash and the known MCP memory writer")
     for ev, groups in events.items():
         if not isinstance(groups, list) or not groups:
             fail(f"hooks.{ev} must be a non-empty array")

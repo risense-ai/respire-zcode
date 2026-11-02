@@ -26,6 +26,7 @@ FAKE_SHOW_DIFF = ('{"status":"ok","summary":{"id":"%(id)s"},'
                   '"details":{"entry":{"id":"%(id)s","title":"DIFFERENT-TITLE","content":"different body"}}}'
                   ) % {"id": FAKE_SID}
 FAKE_RECALL_SKIP = '{"status":"skip"}'
+FAKE_SHOW_PARENTED = '{"status":"ok","summary":{"id":"TARGET_ID"},"details":{"entry":{"id":"TARGET_ID","parent_id":"aaaaaaaaaaaaaaaa"}}}'
 
 # fake rsrs 只按子命令回固定信封；remember 的 status 由 RESPITE_FAKE_STORE_STATUS 切换
 FAKE_CMD = r"""@echo off
@@ -45,12 +46,15 @@ if "%RESPITE_FAKE_STORE_STATUS%"=="pending" (echo {PENDING})
 if "%RESPITE_FAKE_STORE_STATUS%"=="ok" (echo {OK})
 exit /b 0
 :show
+if "%RESPITE_FAKE_STORE_STATUS%"=="parented_bad" if "%~2"=="aaaaaaaaaaaaaaaa" (echo {"status":"fail"} & exit /b 2)
+if "%RESPITE_FAKE_STORE_STATUS%"=="parented_bad" (echo {SHOW_PARENTED} & exit /b 0)
+if "%RESPITE_FAKE_STORE_STATUS%"=="parented" (echo {SHOW_PARENTED} & exit /b 0)
 if "%RESPITE_FAKE_STORE_STATUS%"=="bad_parent" (echo {"status":"fail"} & exit /b 2)
 echo {SHOW_DIFF}
 exit /b 0
 """.replace("{STATUS_OK}", FAKE_STATUS_OK).replace("{LIST_EMPTY}", FAKE_LIST_EMPTY) \
    .replace("{RECALL_SKIP}", FAKE_RECALL_SKIP).replace("{PENDING}", FAKE_PENDING) \
-   .replace("{OK}", FAKE_OK).replace("{SHOW_DIFF}", FAKE_SHOW_DIFF)
+   .replace("{OK}", FAKE_OK).replace("{SHOW_DIFF}", FAKE_SHOW_DIFF).replace("{SHOW_PARENTED}", FAKE_SHOW_PARENTED.replace('TARGET_ID','%~2'))
 
 FAKE_SH = """#!/bin/sh
 if [ "$1" = "--client-only" ]; then shift; fi
@@ -62,14 +66,14 @@ case "$1" in
     else
       echo '%s'
     fi ;;
-  show) if [ "$RESPITE_FAKE_STORE_STATUS" = "bad_parent" ]; then echo '{"status":"fail"}'; else echo '%s'; fi ;;
+  show) if [ "$RESPITE_FAKE_STORE_STATUS" = "bad_parent" ]; then echo '{"status":"fail"}'; elif [ "$RESPITE_FAKE_STORE_STATUS" = "parented" ]; then echo '%s' | sed "s/TARGET_ID/$2/g"; else echo '%s'; fi ;;
   status) echo '%s' ;;
   list) echo '%s' ;;
   recall) echo '%s' ;;
   *) echo '{"status":"fail","errors":["fake: unknown"]}' ; exit 1 ;;
 esac
 exit 0
-""" % (FAKE_PENDING, FAKE_OK, FAKE_SHOW_DIFF, FAKE_STATUS_OK, FAKE_LIST_EMPTY, FAKE_RECALL_SKIP)
+""" % (FAKE_PENDING, FAKE_OK, FAKE_SHOW_PARENTED, FAKE_SHOW_DIFF, FAKE_STATUS_OK, FAKE_LIST_EMPTY, FAKE_RECALL_SKIP)
 
 
 def find_powershell():
@@ -250,6 +254,12 @@ class TestRespirePs1(unittest.TestCase):
             'rsrs remember "body contains --parent abcdef0112345678abcdef0112345678" --importance important',
             'X=1 rsrs remember "fact" --importance important',
             '>out.log rsrs remember fact --importance important --force',
+            'rsrs >out.log remember fact --importance important --force',
+            'echo $(rsrs >out.log remember fact --importance important --force)',
+            'bash -c "rsrs >out.log remember fact --importance important --force"',
+            'rsrs --json >out.log remember fact --importance important --force',
+            'rsrs remember fact --merge-ids abcdef0112345678abcdef0112345678',
+            'rsrs remember fact --importance trivial --merge-ids abcdef0112345678abcdef0112345678',
             '>out.log 2>err.log rsrs remember fact --importance important --force',
             'echo $(rsrs remember fact --importance important --force)',
             'echo "$(rsrs remember fact --importance important --force)"',
@@ -277,27 +287,48 @@ class TestRespirePs1(unittest.TestCase):
                         'rsrs recall remember --titles --json',
                         'rsrs --client-only --json recall remember --titles',
                         'rsrs --json --client-only candidates remember',
+                        'rsrs --model-task-id audit --progress-id progress recall remember --json',
                         'npx rsrs recall remember --json',
                         'bash -c "rsrs recall remember --json"',
                         "echo '$(rsrs remember fact --importance important --force)'",
                         "echo '`rsrs remember fact --importance important --force`'",
                         'rsrs remember "diary" --importance trivial', 'rsrs remember "fact" --help'):
             self.assertEqual(self.run_hook('PreToolUse', {'tool_name':'Bash','tool_input':{'command':command}}), '', command)
-        for prefix in ('--client-only --json', '--json --client-only'):
+        for prefix in ('--client-only --json', '--json --client-only', '--model-task-id audit --progress-id progress', '--progress-id=progress --model-task-id=audit --json'):
             out = json.loads(self.run_hook('PreToolUse', {'tool_name':'Bash','tool_input':{'command':'rsrs ' + prefix + ' remember "fact" --importance important'}}))
             self.assertEqual(out['hookSpecificOutput']['permissionDecision'], 'deny')
         command = 'rsrs remember "fact" --importance important --parent ' + FAKE_SID
-        metadata = ' --project Respire --tags plugin,parent --type context --summary "candidate summary" --source-refs "[]" --valid-until 2027-01-01T00:00:00.000Z --review-at 2027-01-01T00:00:00.000Z --artifact "{}" --computer TB16P --emotion -1 --supersedes ' + FAKE_SID + ' --see-also ' + FAKE_SID
+        metadata = ' --model-task-id audit --progress-id progress --project Respire --tags plugin,parent --type context --summary "candidate summary" --source-refs "[]" --valid-until 2027-01-01T00:00:00.000Z --review-at 2027-01-01T00:00:00.000Z --artifact "{}" --computer TB16P --emotion -1 --supersedes ' + FAKE_SID + ' --see-also ' + FAKE_SID
         for suffix in (metadata, ' --clear-summary --clear-source-refs --clear-valid-until --clear-review-at --clear-artifact'):
             self.assertEqual(self.run_hook('PreToolUse', {'tool_name':'Bash','tool_input':{'command':'>out.log ' + command + suffix}}), '')
-        for prefix in ('--client-only --json', '--json --client-only'):
+        for prefix in ('--client-only --json', '--json --client-only', '--model-task-id audit --progress-id progress', '--progress-id=progress --model-task-id=audit --json'):
             self.assertEqual(self.run_hook('PreToolUse', {'tool_name':'Bash','tool_input':{'command':'rsrs ' + prefix + ' remember "fact" --importance important --parent ' + FAKE_SID}}), '')
         self.assertEqual(self.run_hook('PreToolUse', {'tool_name':'Bash','tool_input':{'command':command}}), '')
+        for wrapped in ('rsrs >out.log remember fact --importance important --parent ' + FAKE_SID,
+                        'rsrs remember ">" --importance important --parent ' + FAKE_SID,
+                        'rsrs remember fact --merge-ids aaaaaaaaaaaaaaaa --parent ' + FAKE_SID):
+            self.assertEqual(self.run_hook('PreToolUse', {'tool_name':'Bash','tool_input':{'command':wrapped}}), '')
         with open(os.path.join(self.state, 'engine-calls'), encoding='utf-8') as calls:
-            self.assertEqual(calls.read().splitlines(), ['show'] * 5)
+            self.assertEqual(calls.read().splitlines(), ['show'] * 10)
+        promotion='rsrs update ' + FAKE_SID + ' --importance important --content "updated fact"'
+        denied=json.loads(self.run_hook('PreToolUse', {'tool_name':'Bash','tool_input':{'command':promotion}}))
+        self.assertEqual(denied['hookSpecificOutput']['permissionDecision'], 'deny')
+        self.assertIn('attach', denied['hookSpecificOutput']['permissionDecisionReason'])
+        self.assertEqual(self.run_hook('PreToolUse', {'tool_name':'Bash','tool_input':{'command':promotion}}, fake_store_status='parented'), '')
+        denied=json.loads(self.run_hook('PreToolUse', {'tool_name':'Bash','tool_input':{'command':promotion}}, fake_store_status='parented_bad'))
+        self.assertEqual(denied['hookSpecificOutput']['permissionDecision'], 'deny')
+        self.assertEqual(self.run_hook('PreToolUse', {'tool_name':'Bash','tool_input':{'command':'rsrs update ' + FAKE_SID + ' --importance trivial'}}), '')
         denied = json.loads(self.run_hook('PreToolUse', {'tool_name':'Bash','tool_input':{'command':command}}, fake_store_status='bad_parent'))
         self.assertEqual(denied['hookSpecificOutput']['permissionDecision'], 'deny')
         self.assertEqual(self.run_hook('PreToolUse', {'tool_name':'Read','tool_input':{'command':command}}), '')
+        self.assertEqual(self.run_hook('PreToolUse', {'tool_name':'mcp__other__memory_remember','tool_input':{'content':'fact'}}), '')
+        with open(os.path.join(self.state, 'engine-calls'), encoding='utf-8') as calls:
+            before = calls.read()
+        for args in ({'content':'fact','importance':'important','force':True}, {'content':'fact','importance':'important','parent':FAKE_SID}):
+            denied = json.loads(self.run_hook('PreToolUse', {'tool_name':'mcp__respire__memory_remember','tool_input':args}))
+            self.assertEqual(denied['hookSpecificOutput']['permissionDecision'], 'deny')
+        with open(os.path.join(self.state, 'engine-calls'), encoding='utf-8') as calls:
+            self.assertEqual(calls.read(), before)
         denied = json.loads(self.run_hook('PreToolUse', {'tool_name':'Bash','tool_input':{'command':command}}, engine=False))
         self.assertEqual(denied['hookSpecificOutput']['permissionDecision'], 'deny')
 
