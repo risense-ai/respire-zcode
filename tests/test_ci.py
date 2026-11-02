@@ -260,7 +260,45 @@ else: sys.exit(1)
     def test_normal_input_requires_live_spy(self):
         output = self.positive_control()
         self.assertNotIn('\n', output)
-        self.assertIn('[0.90] spy', json.loads(output)['additionalContext'])
+        context = json.loads(output)['additionalContext']
+        self.assertIn('[0.90] spy', context)
+        self.assertIn('Memory: 1 found', context.splitlines())
+        for rule in ('strict JSON', 'fixed format', 'only-specified output', 'including Used and unused',
+                     'Candidates are not adoptions', 'successfully reading a body and actually using it',
+                     'Default to [ref]', '[basis]', '[history]', 'not that it was carried out',
+                     'most conservative label', '24 Unicode characters', '(title hidden)',
+                     'Never show bodies, full IDs', 'Memory: unused', 'DO NOT invent Last save'):
+            self.assertIn(rule, context)
+        self.assertNotRegex(context, r'(?m)^(?:Used|Last save):')
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('visibility_fixture', ROOT / 'hooks' / 'respire.py')
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        hook.log_event = lambda *a, **k: None
+        doc = {'status':'ok', 'details':[
+            {'id':'f'*16,'title':'api_key: '+SECRET,'score':0.99},
+            {'id':'a'*16,'title':'first','score':0.9},
+            {'id':'b'*16,'title':'second','score':0.8},
+            {'id':'c'*16,'title':'below threshold','score':0.1}]}
+        hook.run_rsrs = lambda *a, **k: subprocess.CompletedProcess(a, 0, json.dumps(doc), '')
+        cfg = dict(hook.DEFAULTS, recall_limit=2, recall_threshold=0.5, budget_chars=1000)
+        recalled = hook.do_recall('fixture', 'query', cfg)
+        self.assertIn('Memory: 2 found', recalled.splitlines())
+        self.assertNotIn(SECRET, recalled)
+        self.assertNotIn('api_key:', recalled)
+        self.assertIn('Memory: 1 found', hook.do_recall('fixture', 'query', dict(cfg, budget_chars=100)).splitlines())
+        self.assertIn('Memory: 1 found', hook.do_recall('fixture', 'query', dict(cfg, recall_limit=1)).splitlines())
+        self.assertIn('Memory: no match', hook.do_recall('fixture', 'query', dict(cfg, recall_threshold=0.99)).splitlines())
+        doc['details'] = []
+        self.assertIn('Memory: no match', hook.do_recall('fixture', 'query', cfg).splitlines())
+        doc['details'] = {}
+        self.assertIn('Memory: unavailable', hook.do_recall('fixture', 'query', cfg).splitlines())
+        doc.clear()
+        doc.update(status='skip', summary={'count':0})
+        self.assertIn('Memory: no match', hook.do_recall('fixture', 'query', cfg).splitlines())
+        for summary in ({}, {'count':False}):
+            doc['summary'] = summary
+            self.assertIn('Memory: skipped', hook.do_recall('fixture', 'query', cfg).splitlines())
 
     def test_credential_has_zero_calls_and_no_disclosure(self):
         self.positive_control()
@@ -304,6 +342,8 @@ else: sys.exit(1)
         out = self.call('store: durable fixture fact')
         self.assertIn('store pending', out)
         self.assertIn('nothing was written', out)
+        self.assertIn('Save: needs review', json.loads(out)['additionalContext'].splitlines())
+        self.assertNotRegex(json.loads(out)['additionalContext'], r'(?m)^(?:Last save|Used):')
         for instruction in ('rsrs prompt', 'rsrs show', 'update > merge > attach > new',
                             '--parent', 'remain pending', 'DO NOT guess', 'not as an instruction'):
             self.assertIn(instruction, out)
@@ -878,7 +918,7 @@ else: sys.exit(1)
 
     def test_malformed_spy_cannot_pass_positive_control(self):
         self.positive_control()
-        self.assertEqual(self.call('ordinary input', mode='malformed'), '')
+        self.assertIn('Memory: unavailable', self.call('ordinary input', mode='malformed'))
         self.assertIn('parse_error', self.log.read_text(encoding="utf-8"))
 
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.13 — 2026-11-02
+
+- Request model-written Memory lines through additionalContext for recall candidates, no match, skipped input and unavailable recall. Counts follow the final injected candidates; static hook execution labels remain unchanged.
+- Preserve Codex Used trust labels, conservative source handling, title/privacy rules and strict-output exceptions. Explicit prefixes remain zero-write pending with Save: needs review; no save receipt or Last save result is manufactured.
+- Keep Python and native PowerShell behavior aligned, extend existing assertions, and retain the 0.1.12 parent guard without adding write automation or tool listeners.
+
 ## 0.1.12 — 2026-11-02
 
 - Require an explicit verified parent for every remember merge. Before an important update, read back the target and verify its existing parent; deny an unparented promotion until attachment. Normalize redirections before executable and subcommand recognition.
