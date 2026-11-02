@@ -82,6 +82,7 @@ class CredentialGuard(unittest.TestCase):
         self.spy.write_text(r'''import json, os, sys, datetime, time
 with open(os.environ['TEST_CALLS'], 'a', encoding='utf-8') as f:
     f.write(json.dumps(sys.argv[1:]) + '\n')
+if sys.argv[1] == '--client-only': del sys.argv[1]
 sub = sys.argv[1]
 mode = os.environ.get('STUB_MODE', 'ok')
 list_mode = os.environ.get('STUB_LIST', mode)
@@ -113,6 +114,10 @@ elif sub == 'remember':
         time.sleep(float(os.environ.get('STUB_SLEEP', '2.5'))); print('garbage not json'); sys.exit(0)
     print(json.dumps({'status':'ok','summary':{'action':'created','id':'dddddddddddddddd'}}))
 elif sub == 'show':
+    if mode == 'show_badsummary':
+        print(json.dumps({'status':'ok','summary':{'id':'9999999999999999'},
+                          'details':{'entry':{'id':sys.argv[2]}}}))
+        sys.exit(0)
     if mode == 'show_fail':
         print(json.dumps({'status':'fail','errors':['not found']}))
         sys.exit(2)
@@ -181,10 +186,12 @@ else: sys.exit(1)
                         PYTHONDONTWRITEBYTECODE='1', PYTHONUTF8='1')
 
     def call(self, prompt='', event='UserPromptSubmit', mode='ok', active=False, every=1,
-             session='s1', fast=False, extra_env=None, list_mode=None, no_calls=False, direct_store=False):
+             session='s1', fast=False, extra_env=None, list_mode=None, no_calls=False, direct_store=False, guard_command=None, guard_parent=None, guard_tool="Bash"):
         self.config.write_text(json.dumps({'rsrs':str(self.engine), 'session_rules':True,
                                           'store_nudge_every':every}), encoding="utf-8")
-        if event == 'Stop':
+        if event == 'PreToolUse':
+            args_seq = [['--client-only','show',guard_parent,'--json']] if guard_parent else []
+        elif event == 'Stop':
             args_seq = [['list','--limit','3','--json']]
         elif event == 'SessionStart':
             args_seq = [['status','--json']]
@@ -218,6 +225,8 @@ else: sys.exit(1)
             env['STUB_LIST'] = list_mode
 
         payload = {'prompt':prompt,'hook_event_name':event,'stop_hook_active':active}
+        if event == 'PreToolUse':
+            payload.update(tool_name=guard_tool, tool_input={'command':guard_command})
         if session is not None:
             payload['session_id'] = session
         result = subprocess.run([sys.executable, str(self.launcher)],
@@ -293,6 +302,68 @@ else: sys.exit(1)
             self.assertIn(instruction, out)
         self.assertNotIn('Saved:', out)
         self.assertEqual(self.recorded(), [])
+
+        # Real prefix paths and PreToolUse are separate checks; no write is executed here.
+        blocked = [
+            'cd repo && rsrs remember "fact" --title "title" --importance important --force 2>&1 | head -80',
+            'rsrs remember "fact" --importance important',
+            'X=1 rsrs remember "fact" --importance important',
+            '>out.log rsrs remember fact --importance important --force',
+            '>out.log 2>err.log rsrs remember fact --importance important --force',
+            'echo $(rsrs remember fact --importance important --force)',
+            'echo "$(rsrs remember fact --importance important --force)"',
+            'echo `rsrs remember fact --importance important --force`',
+            'npx rsrs remember fact --importance important --force',
+            'npm exec rsrs remember fact --importance important --force',
+            'py rsrs remember fact --importance important --force',
+            'sudo rsrs remember fact --importance important --force',
+            'timeout 5 rsrs remember fact --importance important --force',
+            'rsrs remember "body mentions --parent dddddddddddddddd" --importance important',
+            'rsrs remember "fact" --importance important --parent ""',
+            'rsrs remember "fact" --importance=important --parent=',
+            'rsrs remember "fact" --importance trivial --force',
+            'rsrs remember "fact" --importance trivial; rsrs remember "other" --importance important',
+            'bash -c "rsrs remember fact --importance important --parent dddddddddddddddd"',
+            '(rsrs remember "fact" --importance important --parent dddddddddddddddd)',
+            'rsrs remember "$fact" --importance important --parent dddddddddddddddd',
+            'rsrs remember "fact" --importance important --parent dddddddddddddddd --force',
+            'rsrs remember "unfinished',
+        ]
+        for command in blocked:
+            before = self.recorded()
+            out = json.loads(self.call(event='PreToolUse', guard_command=command))
+            self.assertEqual(out['hookSpecificOutput']['hookEventName'], 'PreToolUse')
+            self.assertEqual(out['hookSpecificOutput']['permissionDecision'], 'deny', command)
+            self.assertEqual(self.recorded(), before, command)
+        for command in ('echo "rsrs remember"', 'rsrs recall "fact" --json',
+                        'rsrs recall remember --titles --json',
+                        'rsrs --client-only --json recall remember --titles',
+                        'rsrs --json --client-only candidates remember',
+                        'npx rsrs recall remember --json',
+                        'bash -c "rsrs recall remember --json"',
+                        "echo '$(rsrs remember fact --importance important --force)'",
+                        "echo '`rsrs remember fact --importance important --force`'",
+                        'rsrs remember "diary" --importance trivial',
+                        'rsrs remember "fact" --help'):
+            self.assertEqual(self.call(event='PreToolUse', guard_command=command), '', command)
+        for prefix in ('--client-only --json', '--json --client-only'):
+            denied = json.loads(self.call(event='PreToolUse', guard_command='rsrs ' + prefix + ' remember "fact" --importance important'))
+            self.assertEqual(denied['hookSpecificOutput']['permissionDecision'], 'deny')
+            self.assertEqual(self.call(event='PreToolUse', guard_command='rsrs ' + prefix + ' remember "fact" --importance important --parent dddddddddddddddd', guard_parent='dddddddddddddddd'), '')
+        metadata = ' --project Respire --tags plugin,parent --type context --summary "candidate summary" --source-refs "[]" --valid-until 2027-01-01T00:00:00.000Z --review-at 2027-01-01T00:00:00.000Z --artifact "{}" --computer TB16P --emotion -1 --supersedes dddddddddddddddd --see-also dddddddddddddddd'
+        for suffix in (metadata, ' --clear-summary --clear-source-refs --clear-valid-until --clear-review-at --clear-artifact'):
+            self.assertEqual(self.call(event='PreToolUse', guard_command='>out.log rsrs remember fact --importance important --parent dddddddddddddddd' + suffix, guard_parent='dddddddddddddddd'), '')
+        command = 'cd repo && rsrs remember "fact" --title "title" --importance=important --parent=dddddddddddddddd 2>&1 | head -80'
+        self.assertEqual(self.call(event='PreToolUse', guard_command=command,
+                                   guard_parent='dddddddddddddddd'), '')
+        for mode in ('show_fail', 'show_wrongid', 'show_badsummary', 'show_badarr', 'show_strdet', 'malformed', 'dead', 'hang'):
+            out = json.loads(self.call(event='PreToolUse', guard_command=command,
+                                       guard_parent='dddddddddddddddd', mode=mode, fast=True))
+            self.assertEqual(out['hookSpecificOutput']['permissionDecision'], 'deny', mode)
+        out = json.loads(self.call(event='PreToolUse', guard_command=command,
+                                  extra_env={'RESPITE_HOOK_BUDGET_S':'1'}))
+        self.assertEqual(out['hookSpecificOutput']['permissionDecision'], 'deny')
+        self.assertEqual(self.call(event='PreToolUse', guard_command=command, guard_tool='Read'), '')
 
     def test_store_warn_is_written_not_refused(self):
         # CLI 契约：status=warn + 有效 id = 已提交但有警告（parent 未解析等）——
@@ -778,7 +849,8 @@ def assert_versions(root):
     entries=[entry for entry in market['plugins'] if entry['name']=='respire']
     manifest=json.loads((root/'.zcode-plugin/plugin.json').read_text(encoding='utf-8'))
     hook=re.search(r'^VERSION = "([^"]+)"',(root/'hooks/respire.py').read_text(encoding='utf-8'),re.M).group(1)
-    if len(entries)!=1 or hook!=manifest['version'] or ('version' in entries[0] and entries[0]['version']!=manifest['version']):
+    ps=re.search(r"^\$VERSION = '([^']+)'",(root/'scripts/respire.ps1').read_text(encoding='utf-8-sig'),re.M).group(1)
+    if len(entries)!=1 or ps!=manifest['version'] or hook!=manifest['version'] or ('version' in entries[0] and entries[0]['version']!=manifest['version']):
         raise ValueError('Plugin/hook/marketplace version mismatch')
 
 class VersionConsistency(unittest.TestCase):
@@ -786,14 +858,17 @@ class VersionConsistency(unittest.TestCase):
         assert_versions(ROOT)
 
     def test_each_mismatch_is_rejected(self):
-        for component in ('marketplace','manifest','hook'):
+        for component in ('marketplace','manifest','hook','ps'):
             with self.subTest(component=component), tempfile.TemporaryDirectory(prefix='version-negative-') as directory:
                 fixture=Path(directory)
-                for name in ('.claude-plugin', '.zcode-plugin', 'hooks'):
+                for name in ('.claude-plugin', '.zcode-plugin', 'hooks', 'scripts'):
                     shutil.copytree(ROOT/name,fixture/name,ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
                 if component=='hook':
                     path=fixture/'hooks/respire.py'
                     path.write_text(re.sub(r'^VERSION = "[^"]+"','VERSION = "999.0.0"',path.read_text(encoding='utf-8'),count=1,flags=re.M),encoding='utf-8')
+                elif component=='ps':
+                    path=fixture/'scripts/respire.ps1'
+                    path.write_text(re.sub(r"^\$VERSION = '[^']+'", "$VERSION = '999.0.0'",path.read_text(encoding='utf-8-sig'),count=1,flags=re.M),encoding='utf-8')
                 else:
                     path=fixture/('.claude-plugin/marketplace.json' if component=='marketplace' else '.zcode-plugin/plugin.json')
                     doc=json.loads(path.read_text(encoding='utf-8'))

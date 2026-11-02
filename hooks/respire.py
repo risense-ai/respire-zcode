@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # respire —— respire(rsrs) × ZCode 记忆插件（hook 端单入口）
 # 与 respire-qoder / respire-dimcode / respire-workbuddy 同源方案：
-# SessionStart 注简则、UserPromptSubmit 每轮召回、Stop 存储检查。
-# 用法: python3 respire.py <SessionStart|UserPromptSubmit|Stop>   （事件 JSON 走 stdin）
+# SessionStart rules, UserPromptSubmit recall, PreToolUse write guard, Stop wrap-up.
+# 用法: python3 respire.py <SessionStart|UserPromptSubmit|PreToolUse|Stop>   （事件 JSON 走 stdin）
 # ZCode 协议差异（已核 ZCode runtime 源码）：
 #   1. stdout 不认纯文本——只有以 { 开头且过严格 schema 的 JSON 才被消费，
 #      故一切注入走 {"additionalContext": "..."} 顶层键（三事件均注入）；
@@ -23,7 +23,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.1.11"
+VERSION = "0.1.12"
 
 # 超时窗（秒）：须盖住 rsrs runtime 冷启动（实测 doctor 模型加载 7s+），否则首轮静默、热后即灵
 RECALL_T = 14
@@ -885,6 +885,247 @@ def on_stop(data: dict, cfg: dict, engine):
     return {"decision": "block", "reason": STORE_NUDGE}
 
 
+def _bash_tokens(command: str) -> list:
+    """Tokenize literal Bash words and control operators, without evaluating input."""
+    tokens, word = [], []
+    quote, started, dynamic = "", False, False
+    i = 0
+    while i < len(command):
+        char = command[i]
+        if quote == "'":
+            if char == "'":
+                quote = ""
+            else:
+                word.append(char)
+        elif char == "\\":
+            if i + 1 >= len(command):
+                raise ValueError("unfinished escape")
+            following = command[i + 1]
+            if not quote or following in ('"', "\\", "$", chr(96), "\n"):
+                if following != "\n":
+                    word.append(following)
+                    started = True
+                i += 1
+            else:
+                word.append(char)
+        elif quote:
+            if char == quote:
+                quote = ""
+            else:
+                dynamic |= char in ("$", chr(96))
+                word.append(char)
+        elif char in ("'", '"'):
+            quote, started = char, True
+        elif char == "#" and not started:
+            while i + 1 < len(command) and command[i + 1] != "\n":
+                i += 1
+        elif char.isspace() or char in ";&|<>()":
+            if started:
+                tokens.append(("".join(word), dynamic, False))
+                word, started, dynamic = [], False, False
+            if char == "\n" or char in ";&|<>()":
+                operator = char
+                if i + 1 < len(command) and (
+                    char + command[i + 1] in ("&&", "||", ">>", "<<", ">&", "<&")
+                ):
+                    operator += command[i + 1]
+                    i += 1
+                tokens.append((operator, False, True))
+        else:
+            started = True
+            dynamic |= char in ("$", chr(96))
+            word.append(char)
+        i += 1
+    if quote:
+        raise ValueError("unfinished quote")
+    if started:
+        tokens.append(("".join(word), dynamic, False))
+    return tokens
+
+
+def _remember_segments(command: str) -> list:
+    tokens = _bash_tokens(command)
+    executable = re.compile(r"(?:^|[/\\])rsrs(?:\.(?:exe|cmd|ps1))?$", re.I)
+
+    def literal_write(parts, start):
+        if start >= len(parts) or not executable.search(parts[start][0]):
+            return False
+        start += 1
+        while start < len(parts) and parts[start][0] in ("--client-only", "--json"):
+            start += 1
+        return start < len(parts) and parts[start][0] == "remember"
+
+    streams = [tokens]
+    for position, (value, dynamic, _) in enumerate(tokens):
+        if dynamic and value.startswith(chr(96)):
+            tail = [(t[0].strip(chr(96)), t[1], t[2]) for t in tokens[position:]]
+            if literal_write(tail, 0):
+                raise ValueError("command substitution memory write")
+        if dynamic and ("$(" in value or chr(96) in value):
+            streams.append(_bash_tokens(value.strip(chr(96))))
+            if value.startswith(chr(96)) and literal_write(streams[-1], 0):
+                raise ValueError("command substitution memory write")
+    for stream in streams:
+        for i, token in enumerate(stream[:-2]):
+            if token[1] and token[0].endswith("$") and stream[i + 1][0] == "(" and literal_write(stream, i + 2):
+                raise ValueError("command substitution memory write")
+    segments, segment = [], []
+    for token in tokens + [(";", False, True)]:
+        if token[2] and token[0] in (";", "&&", "||", "|", "&", "\n"):
+            if segment:
+                segments.append(segment)
+                segment = []
+        else:
+            segment.append(token)
+    writes = []
+    wrapped = {"bash", "sh", "cmd", "cmd.exe", "powershell", "powershell.exe",
+               "pwsh", "pwsh.exe", "python", "python3", "py", "node", "env", "command", "exec", "npx", "npm", "sudo", "timeout",
+               "(", "{", "if", "then", "do", "while", "for", "case", "!"}
+    for segment in segments:
+        while segment:
+            if segment[0][0].isdigit() and len(segment) > 1 and segment[1][2]:
+                segment = segment[1:]
+            if segment[0][2] and segment[0][0] in (">", ">>", ">&", "<", "<&"):
+                if len(segment) < 3:
+                    raise ValueError("missing redirected command")
+                segment = segment[2:]
+            else:
+                break
+        if not segment:
+            continue
+        values = [token[0] for token in segment]
+        first = values[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
+        if not executable.search(values[0]):
+            if (segment[0][1] and "remember" in values
+                    and re.search(r"\brsrs\b", command, re.I)):
+                raise ValueError("dynamic memory executable")
+            if first in wrapped or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", values[0]):
+                candidates = [segment]
+                for value in values:
+                    if "rsrs" in value.lower() and "remember" in value:
+                        candidates.append(_bash_tokens(value))
+                if any(literal_write(parts, i) for parts in candidates for i in range(len(parts))):
+                    raise ValueError("wrapped memory write")
+            continue
+        index = 1
+        while index < len(values) and values[index] in ("--client-only", "--json"):
+            index += 1
+        if index >= len(values) or values[index] != "remember":
+            if (index < len(values) and (segment[index][1] or values[index].startswith("-"))
+                    and "remember" in values[index + 1:]):
+                raise ValueError("unsupported memory command prefix")
+            continue
+        args, i = [], index + 1
+        while i < len(segment):
+            value, _, operator = segment[i]
+            if value.isdigit() and i + 1 < len(segment) and segment[i + 1][2] and segment[i + 1][0] in (">", ">>", ">&", "<", "<&"):
+                i += 1
+                continue
+            if operator and value in (">", ">>", ">&", "<", "<&"):
+                if i + 1 >= len(segment):
+                    raise ValueError("missing redirection target")
+                i += 2
+                continue
+            if operator or segment[i][1]:
+                raise ValueError("dynamic memory write")
+            args.append(value)
+            i += 1
+        writes.append(args)
+    return writes
+
+
+def _memory_write_parent(args: list):
+    if "--help" in args or "-h" in args:
+        return None
+    importance, parent = "trivial", None
+    seen, i = set(), 0
+    while i < len(args):
+        argument = args[i]
+        name, separator, value = argument.partition("=")
+        if name in ("--force", "-f"):
+            raise ValueError("force")
+        if name in ("--importance", "-i", "--parent", "-p", "--title", "--merge-ids",
+                    "--type", "--summary", "--source-refs", "--valid-until", "--review-at",
+                    "--artifact", "--tags", "--project", "--computer", "--emotion", "--supersedes", "--see-also"):
+            key = {"-i": "--importance", "-p": "--parent"}.get(name, name)
+            if key in seen:
+                raise ValueError("duplicate option")
+            seen.add(key)
+            if not separator:
+                i += 1
+                if i >= len(args) or (args[i].startswith("-") and not (key == "--emotion" and re.fullmatch(r"-\d+", args[i]))):
+                    raise ValueError("missing option value")
+                value = args[i]
+            if key == "--importance":
+                importance = value
+            elif key == "--parent":
+                parent = value
+        elif name.startswith("-") and name not in ("--json", "--client-only", "--clear-summary", "--clear-source-refs", "--clear-valid-until", "--clear-review-at", "--clear-artifact"):
+            raise ValueError("unsupported write option")
+        i += 1
+    if importance not in ("important", "trivial"):
+        raise ValueError("unknown importance")
+    if parent is not None and not re.fullmatch(r"(?:[a-fA-F0-9]{8,64}|[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12})", parent):
+        raise ValueError("invalid parent")
+    if importance == "important" and parent is None:
+        raise ValueError("missing parent")
+    return parent
+
+
+def _guard_deny(reason: str) -> dict:
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+            "permissionDecision": "deny", "permissionDecisionReason": reason}}
+
+
+def on_pre_tool_use(data: dict, cfg: dict, engine):
+    if str(data.get("tool_name") or "").lower() != "bash":
+        return ""
+    tool_input = data.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str):
+        return ""
+    try:
+        writes = _remember_segments(command)
+    except ValueError:
+        if re.search(r"\brsrs(?:\.(?:exe|cmd|ps1))?\b", command, re.I) and re.search(r"\bremember\b", command):
+            log_event(cfg, "pretool", "deny_unparsed")
+            return _guard_deny("Respire blocked an opaque or dynamic memory write. Use one explicit literal rsrs remember command; do not use shell wrappers or substitutions.")
+        return ""
+    verified = set()
+    deadline = time.monotonic() + max(0.0, min(_hook_budget_s() - 2.0, 16.0))
+    for args in writes:
+        try:
+            parent = _memory_write_parent(args)
+        except ValueError:
+            log_event(cfg, "pretool", "deny_arguments")
+            return _guard_deny("Respire blocked this memory write. DO NOT use --force. An important record requires one non-empty literal --parent ID. Read policy and candidate bodies; update or merge first, and report missing placement as pending instead of writing at the root.")
+        if parent is None or parent in verified:
+            continue
+        if not engine or deadline - time.monotonic() <= 0:
+            log_event(cfg, "pretool", "deny_parent_unavailable")
+            return _guard_deny("Respire could not verify the parent without changing engine state. Nothing was written; keep placement pending.")
+        try:
+            result = run_rsrs(engine, ["--client-only", "show", parent, "--json"],
+                              min(SHOW_T, deadline - time.monotonic()))
+            doc = json.loads(result.stdout) if result is not None else {}
+            details = doc.get("details") if isinstance(doc, dict) else None
+            entry = details.get("entry") if isinstance(details, dict) else None
+            identifier = entry.get("id") if isinstance(entry, dict) else None
+            summary = doc.get("summary") if isinstance(doc, dict) else None
+            summary_id = summary.get("id") if isinstance(summary, dict) else None
+            valid = (result is not None and result.returncode == 0 and doc.get("status") == "ok"
+                     and isinstance(identifier, str) and summary_id == identifier
+                     and re.fullmatch(r"(?:[a-fA-F0-9]{16,64}|[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12})", identifier)
+                     and identifier.lower().startswith(parent.lower()))
+        except Exception:
+            valid = False
+        if not valid:
+            log_event(cfg, "pretool", "deny_parent_unverified")
+            return _guard_deny("Respire blocked this write because the literal parent could not be verified by a read-only show. Report missing placement as pending; do not force, guess a parent, or change engine mode.")
+        verified.add(parent)
+    return ""
+
+
 def on_prompt(data: dict, cfg: dict, engine) -> str:
     prompt = data.get("prompt")
     if not isinstance(prompt, str):
@@ -995,12 +1236,20 @@ def main() -> None:
                 log_event(cfg, "session", "ok", "segs=" + (",".join(segs) or "none"))
         elif event == "UserPromptSubmit":
             out = on_prompt(data, cfg, engine)
+        elif event == "PreToolUse":
+            out = on_pre_tool_use(data, cfg, engine)
         elif event == "Stop":
             out = on_stop(data, cfg, engine)
         else:
             out = ""
     except Exception as e:
-        out = ""  # fail-open——但必须留痕，否则「时灵时不灵」无从复盘
+        out = ""
+        tool_input = data.get("tool_input") if isinstance(data, dict) else None
+        command = tool_input.get("command") if isinstance(tool_input, dict) else None
+        if (event == "PreToolUse" and str(data.get("tool_name") or "").lower() == "bash"
+                and isinstance(command, str) and re.search(r"\brsrs\b", command, re.I)
+                and re.search(r"\bremember\b", command)):
+            out = _guard_deny("Respire could not safely validate this memory write. Nothing was authorized; keep placement pending and use one explicit literal command.")
         try:
             log_event(DEFAULTS, event or "unknown", "fatal", f"{type(e).__name__}: {e}")
         except Exception:

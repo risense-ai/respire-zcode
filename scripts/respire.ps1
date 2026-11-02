@@ -1,10 +1,10 @@
 ﻿# respire —— Windows 端 hook 入口（hooks/respire.py 的 PowerShell 5.1 原生移植）。
 # 直接编排 rsrs 引擎（probe/recall/remember/show/list），不经过 Python——Windows 上
 # PATH 的 python3/python 常命中微软商店 stub，Python 链路不可依赖。
-# 用法: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File respire.ps1 <SessionStart|UserPromptSubmit|Stop>
+# 用法: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File respire.ps1 <SessionStart|UserPromptSubmit|PreToolUse|Stop>
 #       事件 JSON 走 stdin；输出/行为契约与 hooks/respire.py 逐条对齐：
 #   1. stdout 只认 {"additionalContext":...}（文本）或 {"decision":"block","reason":...}（Stop）；
-#   2. 铁律 fail-open——任何异常 → 空 stdout、exit 0（「无决策、放行」），绝不拦会话；
+#   2. Recognized memory writes fail closed with deny; unrelated failures remain silent. Exit is always 0.
 #   3. Stop 一次收尾锁：每会话 O_EXCL latch，新真实 prompt 重武装，至多 block 一次。
 # 语法限定 PowerShell 5.1（Windows 自带）：无 &&/||、三元、??、-AsHashtable；
 # .NET Framework 无 ProcessStartInfo.ArgumentList，参数一律引号拼接。
@@ -17,7 +17,7 @@ param([Parameter(Mandatory = $true, Position = 0)][string]$Event)
 
 $ErrorActionPreference = 'Stop'
 
-$VERSION = '0.1.11'
+$VERSION = '0.1.12'
 
 # 超时窗（秒）：与 respire.py 相同口径，盖住 rsrs runtime 冷启动
 $T_RECALL = 14; $T_PROBE = 10; $T_STORE = 18; $T_LIST = 6; $T_SHOW = 8
@@ -855,6 +855,215 @@ function Invoke-DoRecall([string]$engine, [string]$prompt, [hashtable]$cfg) {
     return (@($head) + $lines.ToArray()) -join "`n"
 }
 
+function Get-BashTokens([string]$command) {
+    $tokens = New-Object 'System.Collections.Generic.List[object]'
+    $word = New-Object Text.StringBuilder
+    $quote = ''; $started = $false; $dynamic = $false
+    for ($i = 0; $i -lt $command.Length; $i++) {
+        $ch = [string]$command[$i]
+        if ($quote -eq "'") {
+            if ($ch -eq "'") { $quote = '' } else { [void]$word.Append($ch) }
+        } elseif ($ch -eq '\') {
+            if ($i + 1 -ge $command.Length) { throw 'unfinished escape' }
+            $next = [string]$command[$i + 1]
+            if (-not $quote -or $next -in @('"', '\', '$', [string][char]96, "`n")) {
+                if ($next -ne "`n") { [void]$word.Append($next); $started = $true }
+                $i++
+            } else { [void]$word.Append($ch) }
+        } elseif ($quote) {
+            if ($ch -eq $quote) { $quote = '' }
+            else {
+                if ($ch -in @('$', [string][char]96)) { $dynamic = $true }
+                [void]$word.Append($ch)
+            }
+        } elseif ($ch -in @("'", '"')) {
+            $quote = $ch; $started = $true
+        } elseif ($ch -eq '#' -and -not $started) {
+            while ($i + 1 -lt $command.Length -and $command[$i + 1] -ne "`n") { $i++ }
+        } elseif ([char]::IsWhiteSpace($command[$i]) -or $ch -in @(';', '&', '|', '<', '>', '(', ')')) {
+            if ($started) {
+                $tokens.Add([pscustomobject]@{ Value=$word.ToString(); Dynamic=$dynamic; Operator=$false })
+                [void]$word.Clear(); $started=$false; $dynamic=$false
+            }
+            if ($ch -eq "`n" -or $ch -in @(';', '&', '|', '<', '>', '(', ')')) {
+                $operator = $ch
+                if ($i + 1 -lt $command.Length -and ($ch + $command[$i + 1]) -in @('&&', '||', '>>', '<<', '>&', '<&')) {
+                    $operator += $command[$i + 1]; $i++
+                }
+                $tokens.Add([pscustomobject]@{ Value=$operator; Dynamic=$false; Operator=$true })
+            }
+        } else {
+            $started = $true
+            if ($ch -in @('$', [string][char]96)) { $dynamic = $true }
+            [void]$word.Append($ch)
+        }
+    }
+    if ($quote) { throw 'unfinished quote' }
+    if ($started) { $tokens.Add([pscustomobject]@{ Value=$word.ToString(); Dynamic=$dynamic; Operator=$false }) }
+    return $tokens.ToArray()
+}
+
+function Get-RememberSegments([string]$command) {
+    $tokens = @(Get-BashTokens $command)
+    function Test-LiteralWrite([object[]]$parts, [int]$start) {
+        if ($start -ge $parts.Count -or $parts[$start].Value -notmatch '(?i)(?:^|[/\\])rsrs(?:\.(?:exe|cmd|ps1))?$') { return $false }
+        $start++
+        while ($start -lt $parts.Count -and $parts[$start].Value -cin @('--client-only','--json')) { $start++ }
+        return ($start -lt $parts.Count -and $parts[$start].Value -ceq 'remember')
+    }
+    $streams = New-Object 'System.Collections.Generic.List[object]'
+    $streams.Add($tokens)
+    for ($position=0; $position -lt $tokens.Count; $position++) {
+        $token=$tokens[$position]
+        if ($token.Dynamic -and $token.Value.StartsWith([string][char]96)) {
+            $tail=@($tokens | Select-Object -Skip $position | ForEach-Object { [pscustomobject]@{Value=$_.Value.Trim([char]96)} })
+            if (Test-LiteralWrite $tail 0) { throw 'command substitution memory write' }
+        }
+        if ($token.Dynamic -and ($token.Value.Contains('$(') -or $token.Value.Contains([string][char]96))) {
+            $nested = @(Get-BashTokens $token.Value.Trim([char]96))
+            $streams.Add($nested)
+            if ($token.Value.StartsWith([string][char]96) -and (Test-LiteralWrite $nested 0)) { throw 'command substitution memory write' }
+        }
+    }
+    foreach ($stream in $streams) {
+        for ($i=0; $i + 2 -lt $stream.Count; $i++) {
+            if ($stream[$i].Dynamic -and $stream[$i].Value.EndsWith('$') -and $stream[$i+1].Value -ceq '(' -and (Test-LiteralWrite $stream ($i+2))) { throw 'command substitution memory write' }
+        }
+    }
+    $segments = New-Object 'System.Collections.Generic.List[object]'
+    $segment = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($token in ($tokens + @([pscustomobject]@{ Value=';'; Dynamic=$false; Operator=$true }))) {
+        if ($token.Operator -and $token.Value -in @(';', '&&', '||', '|', '&', "`n")) {
+            if ($segment.Count) { $segments.Add($segment.ToArray()); $segment.Clear() }
+        } else { $segment.Add($token) }
+    }
+    $writes = New-Object 'System.Collections.Generic.List[object]'
+    $wrapped = @('bash','sh','cmd','cmd.exe','powershell','powershell.exe','pwsh','pwsh.exe','python','python3','py','node','env','command','exec','npx','npm','sudo','timeout','(','{','if','then','do','while','for','case','!')
+    foreach ($part in $segments) {
+        while ($part.Count) {
+            if ($part.Count -gt 1 -and $part[0].Value -match '^\d+$' -and $part[1].Operator) { $part=@($part | Select-Object -Skip 1) }
+            if ($part[0].Operator -and $part[0].Value -cin @('>','>>','>&','<','<&')) {
+                if ($part.Count -lt 3) { throw 'missing redirected command' }
+                $part=@($part | Select-Object -Skip 2)
+            } else { break }
+        }
+        if (-not $part.Count) { continue }
+        $values = @($part | ForEach-Object { $_.Value })
+        $first = ($values[0] -replace '\\','/').Split('/')[-1].ToLowerInvariant()
+        if ($values[0] -notmatch '(?i)(?:^|[/\\])rsrs(?:\.(?:exe|cmd|ps1))?$') {
+            if ($part[0].Dynamic -and $values -ccontains 'remember' -and $command -match '(?i)\brsrs\b') { throw 'dynamic memory executable' }
+            if ($first -in $wrapped -or $values[0] -match '^[A-Za-z_][A-Za-z0-9_]*=') {
+                $candidates=New-Object 'System.Collections.Generic.List[object]'
+                $candidates.Add($part)
+                foreach ($value in $values) {
+                    if ($value -match '(?i)rsrs' -and $value.Contains('remember')) { $candidates.Add(@(Get-BashTokens $value)) }
+                }
+                foreach ($candidate in $candidates) {
+                    for ($j=0; $j -lt $candidate.Count; $j++) {
+                        if (Test-LiteralWrite $candidate $j) { throw 'wrapped memory write' }
+                    }
+                }
+            }
+            continue
+        }
+        $index = 1
+        while ($index -lt $values.Count -and $values[$index] -cin @('--client-only','--json')) { $index++ }
+        if ($index -ge $values.Count -or $values[$index] -cne 'remember') {
+            if ($index -lt $values.Count -and ($part[$index].Dynamic -or $values[$index].StartsWith('-')) -and [Array]::IndexOf($values,'remember',$index + 1) -ge 0) { throw 'unsupported memory command prefix' }
+            continue
+        }
+        $argsList = New-Object 'System.Collections.Generic.List[string]'
+        for ($i = $index + 1; $i -lt $part.Count; $i++) {
+            $token = $part[$i]; $value = $token.Value
+            if ($value -match '^\d+$' -and $i + 1 -lt $part.Count -and $part[$i + 1].Operator -and $part[$i + 1].Value -in @('>','>>','>&','<','<&')) { continue }
+            if ($token.Operator -and $value -in @('>','>>','>&','<','<&')) {
+                if ($i + 1 -ge $part.Count) { throw 'missing redirection target' }
+                $i++; continue
+            }
+            if ($token.Operator -or $token.Dynamic) { throw 'dynamic memory write' }
+            $argsList.Add($value)
+        }
+        $writes.Add([pscustomobject]@{ Arguments=$argsList.ToArray() })
+    }
+    return $writes.ToArray()
+}
+
+function Get-MemoryWriteParent([string[]]$arguments) {
+    if ($arguments -ccontains '--help' -or $arguments -ccontains '-h') { return $null }
+    $importance='trivial'; $parent=$null; $seen=@{}
+    for ($i=0; $i -lt $arguments.Count; $i++) {
+        $pair=$arguments[$i] -split '=',2; $name=$pair[0]
+        if ($name -cin @('--force','-f')) { throw 'force' }
+        if ($name -cin @('--importance','-i','--parent','-p','--title','--merge-ids','--type','--summary','--source-refs','--valid-until','--review-at','--artifact','--tags','--project','--computer','--emotion','--supersedes','--see-also')) {
+            $key=$name
+            if ($key -ceq '-i') { $key='--importance' }; if ($key -ceq '-p') { $key='--parent' }
+            if ($seen.ContainsKey($key)) { throw 'duplicate option' }; $seen[$key]=$true
+            if ($pair.Length -eq 2) { $value=$pair[1] }
+            else {
+                $i++
+                if ($i -ge $arguments.Count -or ($arguments[$i].StartsWith('-') -and -not ($key -ceq '--emotion' -and $arguments[$i] -match '^-\d+$'))) { throw 'missing option value' }
+                $value=$arguments[$i]
+            }
+            if ($key -ceq '--importance') { $importance=$value }
+            elseif ($key -ceq '--parent') { $parent=$value }
+        } elseif ($name.StartsWith('-') -and $name -cnotin @('--json','--client-only','--clear-summary','--clear-source-refs','--clear-valid-until','--clear-review-at','--clear-artifact')) { throw 'unsupported write option' }
+    }
+    if ($importance -cnotin @('important','trivial')) { throw 'unknown importance' }
+    if ($null -ne $parent -and $parent -cnotmatch '^(?:[a-fA-F0-9]{8,64}|[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12})$') { throw 'invalid parent' }
+    if ($importance -ceq 'important' -and $null -eq $parent) { throw 'missing parent' }
+    return $parent
+}
+
+function New-GuardDeny([string]$reason) {
+    return @{ hookSpecificOutput=@{ hookEventName='PreToolUse'; permissionDecision='deny'; permissionDecisionReason=$reason } }
+}
+
+function Invoke-PreToolUse([hashtable]$data, [hashtable]$cfg, [string]$engine) {
+    if ([string]$data['tool_name'] -ine 'Bash') { return '' }
+    $inputValue=$data['tool_input']; $command=$null
+    if ($null -ne $inputValue) { try { $command=$inputValue.command } catch { } }
+    if ($command -isnot [string]) { return '' }
+    try { $writes=@(Get-RememberSegments $command) }
+    catch {
+        if ($command -match '(?i)\brsrs(?:\.(?:exe|cmd|ps1))?\b' -and $command -match '\bremember\b') {
+            Write-HookLog $cfg 'pretool' 'deny_unparsed'
+            return New-GuardDeny 'Respire blocked an opaque or dynamic memory write. Use one explicit literal rsrs remember command; do not use shell wrappers or substitutions.'
+        }
+        return ''
+    }
+    $verified=@{}; $deadline=(Get-NowEpoch) + [Math]::Max(0,[Math]::Min((Get-HookBudgetS)-2,16))
+    foreach ($write in $writes) {
+        try { $parent=Get-MemoryWriteParent $write.Arguments }
+        catch {
+            Write-HookLog $cfg 'pretool' 'deny_arguments'
+            return New-GuardDeny 'Respire blocked this memory write. DO NOT use --force. An important record requires one non-empty literal --parent ID. Read policy and candidate bodies; update or merge first, and report missing placement as pending instead of writing at the root.'
+        }
+        if ($null -eq $parent -or $verified.ContainsKey($parent)) { continue }
+        $remaining=$deadline-(Get-NowEpoch)
+        if (-not $engine -or $remaining -lt 1) {
+            Write-HookLog $cfg 'pretool' 'deny_parent_unavailable'
+            return New-GuardDeny 'Respire could not verify the parent without changing engine state. Nothing was written; keep placement pending.'
+        }
+        $valid=$false
+        try {
+            $result=Invoke-Rsrs $engine @('--client-only','show',$parent,'--json') ([int][Math]::Floor([Math]::Min($T_SHOW,$remaining)))
+            if ($null -ne $result -and $result.returncode -eq 0) {
+                $doc=ConvertFrom-Json $result.stdout
+                $identifier=$doc.details.entry.id
+                $summaryId=$doc.summary.id
+                $valid=($doc.status -ceq 'ok' -and $identifier -is [string] -and $summaryId -is [string] -and $summaryId -ceq $identifier -and $identifier -cmatch '^(?:[a-fA-F0-9]{16,64}|[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12})$' -and $identifier.StartsWith($parent,[StringComparison]::OrdinalIgnoreCase))
+            }
+        } catch { $valid=$false }
+        if (-not $valid) {
+            Write-HookLog $cfg 'pretool' 'deny_parent_unverified'
+            return New-GuardDeny 'Respire blocked this write because the literal parent could not be verified by a read-only show. Report missing placement as pending; do not force, guess a parent, or change engine mode.'
+        }
+        $verified[$parent]=$true
+    }
+    return ''
+}
+
+
 # ---------- 事件处理 ----------
 
 function Invoke-OnStop([hashtable]$data, [hashtable]$cfg, [string]$engine) {
@@ -1022,13 +1231,21 @@ try {
             $out = Invoke-SessionStart $cfg $engine
         } elseif ($ev -eq 'UserPromptSubmit') {
             $out = Invoke-OnPrompt $data $cfg $engine
+        } elseif ($ev -eq 'PreToolUse') {
+            $out = Invoke-PreToolUse $data $cfg $engine
         } elseif ($ev -eq 'Stop') {
             $out = Invoke-OnStop $data $cfg $engine
         } else {
             $out = ''
         }
     } catch {
-        $out = ''   # fail-open——留痕供复盘
+        $out = ''
+        try {
+            $command = $data['tool_input'].command
+            if ($ev -eq 'PreToolUse' -and [string]$data['tool_name'] -ieq 'Bash' -and $command -is [string] -and $command -match '(?i)\brsrs\b' -and $command -match '\bremember\b') {
+                $out = New-GuardDeny 'Respire could not safely validate this memory write. Nothing was authorized; keep placement pending and use one explicit literal command.'
+            }
+        } catch { }
         try { Write-HookLog $DEFAULTS $ev 'fatal' "$($_.Exception.GetType().Name): $($_.Exception.Message)" } catch { }
     }
 

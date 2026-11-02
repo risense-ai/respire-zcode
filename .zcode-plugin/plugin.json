@@ -1,7 +1,7 @@
 {
   "name": "respire",
-  "version": "0.1.11",
-  "description": "respire memory for ZCode: every-round title-tier recall, one-prefix store, model-optional degradation. Works fully offline; only encrypted records reach the cloud; enterprises can self-host the sync server. On-machine registration via rsrs register; the sidecar model is an optional boost.",
+  "version": "0.1.12",
+  "description": "respire memory for ZCode: every-round title-tier recall, pending prefix handoff and Bash write guard, model-optional degradation. Works fully offline; only encrypted records reach the cloud; enterprises can self-host the sync server. On-machine registration via rsrs register; the sidecar model is an optional boost.",
   "author": {
     "name": "risense-ai"
   },

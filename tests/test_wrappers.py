@@ -29,6 +29,7 @@ FAKE_RECALL_SKIP = '{"status":"skip"}'
 
 # fake rsrs 只按子命令回固定信封；remember 的 status 由 RESPITE_FAKE_STORE_STATUS 切换
 FAKE_CMD = r"""@echo off
+if /i "%~1"=="--client-only" shift
 set "SUB=%~1"
 if /i "%SUB%"=="remember" goto rem
 >>"%RESPITE_TEST_CALLS%" echo %SUB%
@@ -44,6 +45,7 @@ if "%RESPITE_FAKE_STORE_STATUS%"=="pending" (echo {PENDING})
 if "%RESPITE_FAKE_STORE_STATUS%"=="ok" (echo {OK})
 exit /b 0
 :show
+if "%RESPITE_FAKE_STORE_STATUS%"=="bad_parent" (echo {"status":"fail"} & exit /b 2)
 echo {SHOW_DIFF}
 exit /b 0
 """.replace("{STATUS_OK}", FAKE_STATUS_OK).replace("{LIST_EMPTY}", FAKE_LIST_EMPTY) \
@@ -51,6 +53,7 @@ exit /b 0
    .replace("{OK}", FAKE_OK).replace("{SHOW_DIFF}", FAKE_SHOW_DIFF)
 
 FAKE_SH = """#!/bin/sh
+if [ "$1" = "--client-only" ]; then shift; fi
 echo "$1" >> "$RESPITE_TEST_CALLS"
 case "$1" in
   remember)
@@ -59,7 +62,7 @@ case "$1" in
     else
       echo '%s'
     fi ;;
-  show) echo '%s' ;;
+  show) if [ "$RESPITE_FAKE_STORE_STATUS" = "bad_parent" ]; then echo '{"status":"fail"}'; else echo '%s'; fi ;;
   status) echo '%s' ;;
   list) echo '%s' ;;
   recall) echo '%s' ;;
@@ -241,6 +244,62 @@ class TestRespirePs1(unittest.TestCase):
     def test_bad_event_silent(self):
         out = self.run_hook("__NoSuchEvent__", {"session_id": "t"})
         self.assertEqual(out, "")
+
+        blocked = [
+            'cd repo && rsrs remember "fact" --title "title" --importance important --force 2>&1 | head -80',
+            'rsrs remember "body contains --parent abcdef0112345678abcdef0112345678" --importance important',
+            'X=1 rsrs remember "fact" --importance important',
+            '>out.log rsrs remember fact --importance important --force',
+            '>out.log 2>err.log rsrs remember fact --importance important --force',
+            'echo $(rsrs remember fact --importance important --force)',
+            'echo "$(rsrs remember fact --importance important --force)"',
+            'echo `rsrs remember fact --importance important --force`',
+            'npx rsrs remember fact --importance important --force',
+            'npm exec rsrs remember fact --importance important --force',
+            'py rsrs remember fact --importance important --force',
+            'sudo rsrs remember fact --importance important --force',
+            'timeout 5 rsrs remember fact --importance important --force',
+            'rsrs remember "fact" --importance important --parent ""',
+            'rsrs remember "fact" --importance=important --parent=',
+            'rsrs remember "fact" --importance trivial --force',
+            'rsrs remember "fact" --importance trivial; rsrs remember "other" --importance important',
+            'bash -c "rsrs remember fact --importance important"',
+            '(rsrs remember "fact" --importance important)',
+            'rsrs remember "$fact" --importance important --parent abcdef0112345678abcdef0112345678',
+            'rsrs remember "unfinished',
+        ]
+        for command in blocked:
+            out = json.loads(self.run_hook('PreToolUse', {'tool_name':'Bash','tool_input':{'command':command}}))
+            self.assertEqual(out['hookSpecificOutput']['hookEventName'], 'PreToolUse')
+            self.assertEqual(out['hookSpecificOutput']['permissionDecision'], 'deny', command)
+            self.assertFalse(os.path.exists(os.path.join(self.state, 'engine-calls')))
+        for command in ('echo "rsrs remember"', 'rsrs recall "fact" --json',
+                        'rsrs recall remember --titles --json',
+                        'rsrs --client-only --json recall remember --titles',
+                        'rsrs --json --client-only candidates remember',
+                        'npx rsrs recall remember --json',
+                        'bash -c "rsrs recall remember --json"',
+                        "echo '$(rsrs remember fact --importance important --force)'",
+                        "echo '`rsrs remember fact --importance important --force`'",
+                        'rsrs remember "diary" --importance trivial', 'rsrs remember "fact" --help'):
+            self.assertEqual(self.run_hook('PreToolUse', {'tool_name':'Bash','tool_input':{'command':command}}), '', command)
+        for prefix in ('--client-only --json', '--json --client-only'):
+            out = json.loads(self.run_hook('PreToolUse', {'tool_name':'Bash','tool_input':{'command':'rsrs ' + prefix + ' remember "fact" --importance important'}}))
+            self.assertEqual(out['hookSpecificOutput']['permissionDecision'], 'deny')
+        command = 'rsrs remember "fact" --importance important --parent ' + FAKE_SID
+        metadata = ' --project Respire --tags plugin,parent --type context --summary "candidate summary" --source-refs "[]" --valid-until 2027-01-01T00:00:00.000Z --review-at 2027-01-01T00:00:00.000Z --artifact "{}" --computer TB16P --emotion -1 --supersedes ' + FAKE_SID + ' --see-also ' + FAKE_SID
+        for suffix in (metadata, ' --clear-summary --clear-source-refs --clear-valid-until --clear-review-at --clear-artifact'):
+            self.assertEqual(self.run_hook('PreToolUse', {'tool_name':'Bash','tool_input':{'command':'>out.log ' + command + suffix}}), '')
+        for prefix in ('--client-only --json', '--json --client-only'):
+            self.assertEqual(self.run_hook('PreToolUse', {'tool_name':'Bash','tool_input':{'command':'rsrs ' + prefix + ' remember "fact" --importance important --parent ' + FAKE_SID}}), '')
+        self.assertEqual(self.run_hook('PreToolUse', {'tool_name':'Bash','tool_input':{'command':command}}), '')
+        with open(os.path.join(self.state, 'engine-calls'), encoding='utf-8') as calls:
+            self.assertEqual(calls.read().splitlines(), ['show'] * 5)
+        denied = json.loads(self.run_hook('PreToolUse', {'tool_name':'Bash','tool_input':{'command':command}}, fake_store_status='bad_parent'))
+        self.assertEqual(denied['hookSpecificOutput']['permissionDecision'], 'deny')
+        self.assertEqual(self.run_hook('PreToolUse', {'tool_name':'Read','tool_input':{'command':command}}), '')
+        denied = json.loads(self.run_hook('PreToolUse', {'tool_name':'Bash','tool_input':{'command':command}}, engine=False))
+        self.assertEqual(denied['hookSpecificOutput']['permissionDecision'], 'deny')
 
 
 if __name__ == "__main__":

@@ -96,10 +96,12 @@ if manifest:
 hooks_cfg = parse_json("hooks/hooks.json")
 if hooks_cfg:
     events = hooks_cfg.get("hooks") or {}
-    if set(events) - {"SessionStart", "UserPromptSubmit", "Stop"}:
-        fail(f"unexpected events: {sorted(set(events) - {'SessionStart', 'UserPromptSubmit', 'Stop'})}")
+    if set(events) - {"SessionStart", "UserPromptSubmit", "PreToolUse", "Stop"}:
+        fail(f"unexpected events: {sorted(set(events) - {'SessionStart', 'UserPromptSubmit', 'PreToolUse', 'Stop'})}")
     else:
         ok("hook events subset")
+    if "PreToolUse" not in events or events["PreToolUse"][0].get("matcher") != "Bash":
+        fail("PreToolUse must guard Bash commands")
     for ev, groups in events.items():
         if not isinstance(groups, list) or not groups:
             fail(f"hooks.{ev} must be a non-empty array")
@@ -134,7 +136,7 @@ if hooks_cfg:
                     fail(f"{ev}: statusMessage missing")
     ok("hooks.json shape")
 
-# 主脚本可编译 + 铁律在（fail-open 恒 exit 0）+ ZCode 输出契约（JSON additionalContext / decision block）
+# 主脚本可编译 + exit 0 + ZCode 输出契约（上下文、Stop block、PreToolUse deny）。
 try:
     py_compile.compile(os.path.join(ROOT, "hooks/respire.py"), doraise=True)
     ok("respire.py compiles")
@@ -143,9 +145,9 @@ except Exception as e:
 src = read_text("hooks/respire.py")
 if src:
     if "sys.exit(0)" not in src:
-        fail("respire.py must keep fail-open exit 0")
+        fail("respire.py must keep exit 0 so the fallback chain preserves hook decisions")
     else:
-        ok("fail-open exit present")
+        ok("exit 0 preserves hook decisions")
     if '"additionalContext"' not in src:
         fail('respire.py must emit {"additionalContext": ...} — ZCode ignores plain-text stdout')
     else:
@@ -157,7 +159,11 @@ if src:
     if re.search(r'"decision"\s*:\s*"deny"', src):
         fail('respire.py must not emit decision "deny" — ZCode enum is approve|block')
     else:
-        ok("no deny decision")
+        ok("no invalid top-level deny decision")
+    if not re.search(r'"permissionDecision"\s*:\s*"deny"', src):
+        fail("respire.py must emit the PreToolUse permissionDecision deny contract")
+    else:
+        ok("PreToolUse deny contract")
 
 # marketplace 清单（本地测试市场：仓根即市场根）
 mp = parse_json(".claude-plugin/marketplace.json")

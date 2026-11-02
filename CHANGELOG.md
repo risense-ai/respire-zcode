@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.12 — 2026-11-02
+
+- Add a PreToolUse Bash write guard in Python and native PowerShell. Deny important remembers without a non-empty literal parent, any force flag, and recognized opaque or dynamic memory writes. Inspect every supported compound-command segment.
+- Verify supplied parent IDs with read-only `--client-only show` before allowing a write; failures stay blocked without starting runtime or changing engine mode.
+- Keep compliant hooks silent and denied hooks at exit 0 so interpreter fallback cannot swallow a deny. The guard does not prove prior model reading or semantic placement quality.
+
 ## 0.1.11 — 2026-11-02
 
 - Explicit memory prefixes now return pending without writing, in Python and native PowerShell.
