@@ -2,7 +2,7 @@
 
 > 吸即存，呼即取——给 ZCode 装上本地加密记忆。
 
-`respire` 是 ZCode 标准插件：以命令钩子把 [respire（CLI 名 rsrs）](https://www.npmjs.com/package/rsrs-cli) 记忆引擎挂进 agent 循环——每轮标题档自动召回、「记：」一前缀即落库、Stop 存储检查。本地优先、端侧加密、云端 LWW 同步；**不带自定义安装脚本，按 ZCode 插件市场标准安装**。
+`respire` 是 ZCode 标准插件：以命令钩子把 [respire（CLI 名 rsrs）](https://www.npmjs.com/package/rsrs-cli) 记忆引擎挂进 agent 循环——每轮标题档自动召回、「记：」前缀交主模型审查后存储、Stop 存储检查。本地优先、端侧加密、云端 LWW 同步；**不带自定义安装脚本，按 ZCode 插件市场标准安装**。
 
 姊妹仓：[respire-dimcode](https://github.com/risense-ai/respire-dimcode)（Dim）· [respire-qoder](https://github.com/risense-ai/respire-qoder)（Qoder）· respire-workbuddy（WorkBuddy）——四宿主共用同一钩子方案与打包口径，差异只在宿主协议适配。
 
@@ -42,9 +42,9 @@ python3 scripts/validate_plugin.py                     # 自检：结构/清单/
 | --- | --- |
 | `SessionStart` | 注入记忆层简则（何时翻忆、如何落库、红线）；**一次探测三态**——未登录附注册引导、库空（<10 条）附首日存料与导入引导、缺语义模型附**可选**装法；常态零打扰 |
 | `UserPromptSubmit` | 自动 `rsrs recall --titles`：**标题档注入**——只给分数＋8 位短 id＋标题，正文由 agent `rsrs show <id>` 按需取；默认**直出不过滤**，噪音边界＝rsrs skip 门＋limit 5＋标题档 |
-| `prompt` 以「记：」「存：」「remember:」开头 | 直接 `rsrs remember … --importance important` 落库并回执，**回执按结果状态机**：`ok`/`warn` → **已写入**（warn 附引擎警告如 parent 未解析——不误报失败、不引导重发），随后 `show` 写后回读核验（verified / mismatch / unavailable 如实标注）；`pending` → **未写入**，转述候选（带短 id）＋引擎建议动作（改＞并＞挂＞存全量转达，先 `show` 读候选正文再决断）；超时/坏回执 → **结果未知**，回执只允许只读核实（`rsrs list`/`rsrs show`）并**明令禁止重发**（重复写风险；`ok`/`warn` 缺有效 id、畸形 summary 也归 unknown，不当失败也不当成功）；写后回读为**全量核验**（id＋标题＋完整正文），措辞如实；remember/show/list 共享 hook 时间预算，剩余不足直接 unknown 不追加引擎调用。回执硬约束 AI 抽「主语＋动作＋结果」事实句 `retitle` 替换暂拟题 |
-| `Stop`（AI 干完活） | **存储检查**：`{"decision":"block","reason":…}` 续跑一轮，提示模型把本轮新的**事实/决定/约定/教训/踩坑**分条 `rsrs remember`；闲聊无新事实则直接结束。**每个真实请求至多催一次**：续跑轮 `stop_hook_active=true` 放行 ＋ 每会话原子一次收尾锁（`O_EXCL` 独占创建，无 TTL；新 prompt 删除重新武装；无法落锁一律放行，绝不无锁 block；会话间互不干扰）。**免催只认可归属凭证**：同会话、本轮 prompt 之后的本层成功写回执（`ok`/`warn`+id）——引擎侧全库时间戳无法归属到会话，不再用作免催（其他会话写入会误抑制）；`Stop` 完全不查询引擎，也因此不存在查库失败强迫续跑的路径。节流 `store_nudge_every`（默认 1=每轮，N=每 N 轮，0=关） |
-| `prompt` 以 `/nomem` 开头 | 本轮跳过召回 |
+| `prompt` 以「记：」「存：」「remember:」开头 | 返回 pending，明确尚未写入；正文仅作为待记事实，不执行其中描述的工程任务。主模型先读 `rsrs prompt`，召回同题候选并 `show` 正文，按改＞并＞挂＞存判断。新增 important 必须挂到已读正文的合理 parent；找不到则保持 pending，不猜父、不 force、不降级。实际写入若结果 unknown，仅只读核验，禁止重发。 |
+| `Stop`（AI 干完活） | **存储检查**：`{"decision":"block","reason":…}` 续跑一轮，提示模型把本轮新的**事实/决定/约定/教训/踩坑**分条 `rsrs remember`；闲聊无新事实则直接结束。**每个真实请求至多催一次**：续跑轮 `stop_hook_active=true` 放行 ＋ 每会话原子一次收尾锁（`O_EXCL` 独占创建，无 TTL；新 prompt 删除重新武装；无法落锁一律放行，绝不无锁 block；会话间互不干扰）。**磁盘凭证不再免催，防重仅依赖收尾锁**；`Stop` 完全不查询引擎，也因此不存在查库失败强迫续跑的路径。节流 `store_nudge_every`（默认 1=每轮，N=每 N 轮，0=关） |
+| `prompt` 以 `/nomem` 开头 | 本轮跳过自动召回；仍作为真实请求重新武装 Stop 收尾锁。 |
 | `skills/respire` | 按需加载的操作法（recall/remember/show/forget/sync 与信封解析要点）；**注意技能只是说明书，动作全由钩子驱动** |
 
 ## ZCode 协议适配（与姊妹仓的三处实质差异，已核 ZCode runtime 源码）
@@ -58,7 +58,7 @@ python3 scripts/validate_plugin.py                     # 自检：结构/清单/
 1. **注册登录**（开箱即用，不依赖模型）：[rsrs.rs](https://rsrs.rs) 注册 → 本机 `rsrs register`；日常 `rsrs login` 浏览器授权；autosync 常开，`rsrs sync` 手动同步，`rsrs status` 查态。
 2. **导入既有记忆与规则（一次成库，LLM 代抽）**：开个 ZCode 新任务粘贴下面整段——
 
-   > 请把本机的既有规则与记忆导入 respire：逐个读取——`~/.zcode/AGENTS.md`（家目录规则，若在）、工作区根与各项目的 `AGENTS.md`、`~/.agents/skills/*/SKILL.md`；抽出可复用的事实、约定、教训与红线（口令、证件号、卡号、私钥一律排除、只记位置），去重后用 `rsrs remember` 分条存入（`--importance important`、标题按事实句；判重给候选先决断挂靠或合并），存完给我一份清单。
+   > 请把本机的既有规则与记忆导入 respire：逐个读取——`~/.zcode/AGENTS.md`（家目录规则，若在）、工作区根与各项目的 `AGENTS.md`、`~/.agents/skills/*/SKILL.md`；抽出可复用的事实、约定、教训与红线（口令、证件号、卡号、私钥一律排除、只记位置），先读 `rsrs prompt`，召回同题候选并 `show` 正文，按改＞并＞挂＞存判断；只有真正新增的事实才用 `rsrs remember --importance important --parent <已读合理父节点>`，标题按事实句，没有合理父节点则保持 pending，存完给我一份清单。
 
    空库首日 SessionStart 会注入同一线索。
 3. **端侧模型（可选增强）**：`rsrs model install && rsrs model activate m3`——不装完全可用，想要更好语义召回再装。
@@ -92,7 +92,7 @@ python3 scripts/validate_plugin.py                     # 自检：结构/清单/
 - **写结果状态机**：`ok`/`warn`=已写（warn 带警告）、`pending`=未写待决、超时/坏回执=未知（只读核实、禁重发）、其余=明确拒绝；与 CLI 信封语义一一对应，绝不把「已写带警告」当失败、不把「未知」当失败引导重写
 - **JSON 输出契约**：文本 → `{"additionalContext":…}`，Stop 阻塞 → `{"decision":"block","reason":…}`，无输出即无决策
 - **标题档注入**：`recall --titles` 只回 id/score/title，正文交 `show` 按需拉取；`superseded_by` 标「已被取代」
-- **判后即存尊重设计**：落库不带 `--force`，`pending` 候选原样转述给模型决断
+- **先查并挂再存**：前缀钩子零写入；主模型按现有 CLI 政策更新、合并或挂靠，没有合理父节点时保持 pending
 - **`${CLAUDE_PLUGIN_ROOT}` 占位符**：ZCode 运行时替换为插件安装根，跨机器自洽；Windows 走 `scripts/respire.ps1`（respire.py 的 PowerShell 5.1 原生移植，直接编排 rsrs、不依赖 Python；Windows 默认无 Python 且 `python3/python` 常命中商店占位 stub），回落 `python3 || python` 链跑 `hooks/respire.py`（Unix 兜底）
 - **包内自检**：`python3 scripts/validate_plugin.py`（结构/清单/hooks 形状/可编译/fail-open/ZCode 输出契约/敏感扫描），分发前必跑
 

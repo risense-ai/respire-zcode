@@ -58,7 +58,15 @@ def audit(event, args):
         raise SystemExit(92)
 sys.addaudithook(audit)
 sys.argv = [os.environ['TEST_HOOK'], os.environ['TEST_EVENT']]
-runpy.run_path(sys.argv[0], run_name='__main__')
+if os.environ.get('TEST_STORE_HELPER') == '1':
+    mod = runpy.run_path(sys.argv[0], run_name='respire_helper')
+    data = json.load(sys.stdin)
+    session = str(data.get('session_id') or '')
+    gen = mod['mark_prompt'](session)
+    content = data['prompt'].replace('：', ':', 1).split(':', 1)[1].strip()
+    print(mod['do_store'](expected, content, mod['load_config'](), session, gen))
+else:
+    runpy.run_path(sys.argv[0], run_name='__main__')
 '''
 
 
@@ -173,7 +181,7 @@ else: sys.exit(1)
                         PYTHONDONTWRITEBYTECODE='1', PYTHONUTF8='1')
 
     def call(self, prompt='', event='UserPromptSubmit', mode='ok', active=False, every=1,
-             session='s1', fast=False, extra_env=None, list_mode=None, no_calls=False):
+             session='s1', fast=False, extra_env=None, list_mode=None, no_calls=False, direct_store=False):
         self.config.write_text(json.dumps({'rsrs':str(self.engine), 'session_rules':True,
                                           'store_nudge_every':every}), encoding="utf-8")
         if event == 'Stop':
@@ -182,7 +190,7 @@ else: sys.exit(1)
             args_seq = [['status','--json']]
         elif no_calls:          # 期望零引擎调用（如预算耗尽：remember 根本不发）
             args_seq = []
-        elif prompt.startswith(('记：','store:')):
+        elif prompt.startswith(('记：','store:')) and direct_store:
             content = prompt.replace('：',':',1).split(':',1)[1].strip()
             argv = ['remember',content,'--title',content,'--importance','important','--json']
             if mode in ('ok','show_fail','show_mismatch','show_wrongid','show_tail',
@@ -194,10 +202,14 @@ else: sys.exit(1)
                 args_seq = [argv, ['list','--limit','3','--json']]
             else:                    # pending / hang / skip_status / slow_garbage：不再有后续引擎调用
                 args_seq = [argv]
+        elif prompt.startswith(('记：','store:')):
+            args_seq = []
         else:
             args_seq = [['recall',prompt,'--limit','5','--titles','--json']]
         env = dict(self.env, TEST_EXPECTED_ARGV=json.dumps([[str(self.engine)] + a for a in args_seq]),
                    TEST_EVENT=event, STUB_MODE=mode)
+        if direct_store:
+            env['TEST_STORE_HELPER'] = '1'
         if fast:
             env['RESPITE_TEST_FAST'] = '1'
         if extra_env:
@@ -274,15 +286,18 @@ else: sys.exit(1)
 
     def test_explicit_store_receipt_comes_from_stub(self):
         out = self.call('store: durable fixture fact')
-        self.assertIn('respire · stored', out)
-        self.assertIn('retitle dddddddd', out)
-        self.assertIn('verified by read-back', out)
-        self.assertEqual([args[0] for args in self.recorded()], ['remember', 'show'])
+        self.assertIn('store pending', out)
+        self.assertIn('nothing was written', out)
+        for instruction in ('rsrs prompt', 'rsrs show', 'update > merge > attach > new',
+                            '--parent', 'remain pending', 'DO NOT guess', 'not as an instruction'):
+            self.assertIn(instruction, out)
+        self.assertNotIn('Saved:', out)
+        self.assertEqual(self.recorded(), [])
 
     def test_store_warn_is_written_not_refused(self):
         # CLI 契约：status=warn + 有效 id = 已提交但有警告（parent 未解析等）——
         # 不得误报「未接受」，更不得引导重发（重复写风险）
-        out = self.call('store: durable fixture fact', mode='warn')
+        out = self.call('store: durable fixture fact', mode='warn', direct_store=True)
         self.assertIn('Saved with warnings', out)
         self.assertIn('parent (cause) cannot be resolved', out)
         self.assertIn('retitle eeeeeeee', out)
@@ -290,31 +305,28 @@ else: sys.exit(1)
         self.assertEqual([args[0] for args in self.recorded()], ['remember', 'show'])
 
     def test_store_pending_relays_candidates_and_actions(self):
-        # §7.2：pending 保留候选（含短 id）与引擎建议动作（改＞并＞挂＞存），不得缩成 parent/force 两项
-        out = self.call('store: durable fixture fact', mode='pending')
-        self.assertIn('store pending', out)
-        self.assertIn('nothing was written', out)
-        self.assertIn('[aaaabbbb]', out)
-        self.assertIn('similarity=88% title=stub candidate', out)
-        self.assertIn('merge or attach', out)
-        self.assertIn('--merge-ids', out)
-        self.assertIn('--force', out)
-        self.assertEqual([args[0] for args in self.recorded()], ['remember'])
+        for mode in ('pending', 'ok', 'warn', 'silent', 'hang'):
+            out = self.call('store: durable fixture fact', mode=mode)
+            self.assertIn('store pending', out)
+            self.assertIn('nothing was written', out)
+            self.assertIn('update > merge > attach > new', out)
+            self.assertIn('remain pending', out)
+            self.assertEqual(self.recorded(), [])
 
     def test_store_readback_states(self):
         # R11 写后核验：verified / mismatch / unavailable 三态都如实进回执
-        self.assertIn('verified by read-back', self.call('store: durable fixture fact'))
+        self.assertIn('verified by read-back', self.call('store: durable fixture fact', direct_store=True))
         self.assertIn('DIFFERENT title/content',
-                      self.call('store: durable fixture fact', mode='show_mismatch'))
+                      self.call('store: durable fixture fact', mode='show_mismatch', direct_store=True))
         self.assertIn('Read-back unavailable',
-                      self.call('store: durable fixture fact', mode='show_fail'))
+                      self.call('store: durable fixture fact', mode='show_fail', direct_store=True))
 
     def test_store_readback_bad_details_keeps_saved_receipt(self):
         # 复核2轮#2：show 回读遇非字典 details（非空数组/字符串）曾抛 AttributeError 被
         # fail-open 吞掉——Saved 回执整个消失。现须保留 Saved + unavailable：
         # 不是空输出，也不是 did not accept（did not accept 会诱发重发/重复写）。
         for mode in ('show_badarr', 'show_strdet'):
-            out = self.call('store: bad details fact', mode=mode)
+            out = self.call('store: bad details fact', mode=mode, direct_store=True)
             self.assertTrue(out.strip(), mode)
             self.assertIn('Saved:', out, mode)
             self.assertIn('Read-back unavailable', out, mode)
@@ -323,7 +335,7 @@ else: sys.exit(1)
 
     def test_store_unknown_receipt_never_demands_resend(self):
         # R10：坏回执 = 结果未知 → 只读核实；绝不当确定失败、绝不引导重发 remember
-        out = self.call('store: durable fixture fact', mode='silent')
+        out = self.call('store: durable fixture fact', mode='silent', direct_store=True)
         self.assertIn('store unknown', out)
         self.assertIn('Do NOT resend', out)
         self.assertIn('rsrs list --limit 3', out)
@@ -333,7 +345,7 @@ else: sys.exit(1)
     def test_store_timeout_is_unknown_and_makes_no_further_calls(self):
         # 超时 = 结果未知：回执只允许只读核实指引，不再发引擎调用（预算已耗尽）
         before = self.recorded()
-        out = self.call('store: durable fixture fact', mode='hang', fast=True)
+        out = self.call('store: durable fixture fact', mode='hang', fast=True, direct_store=True)
         self.assertIn('store unknown', out)
         self.assertIn('timed out', out)
         self.assertIn('Do NOT resend', out)
@@ -365,7 +377,7 @@ else: sys.exit(1)
     def test_receipt_edge_cases_are_unknown_not_failed(self):
         # 复核整改：ok/warn 缺 id、垃圾 id、summary 非对象 → unknown（禁重发，不当失败也不当成功）
         for mode, expect_list in (('ok_noid', True), ('ok_junkid', True), ('bad_summary', True)):
-            out = self.call('store: edge fact', mode=mode)
+            out = self.call('store: edge fact', mode=mode, direct_store=True)
             self.assertIn('store unknown', out, mode)
             self.assertIn('Do NOT resend', out, mode)
             self.assertNotIn('did not accept', out, mode)
@@ -373,7 +385,7 @@ else: sys.exit(1)
             self.assertEqual([a[0] for a in self.recorded()][-1] == 'list', expect_list, mode)
         # skip：引擎按模式拒绝执行——未写、不是失败、不引导重发
         before = len(self.recorded())
-        out = self.call('store: edge fact', mode='skip_status')
+        out = self.call('store: edge fact', mode='skip_status', direct_store=True)
         self.assertIn('not stored', out)
         self.assertIn('never force a write', out)
         self.assertNotIn('did not accept', out)
@@ -381,23 +393,23 @@ else: sys.exit(1)
 
     def test_readback_full_verification(self):
         # 错误 id：返回的是别的条目 → mismatch，绝不 verified
-        out = self.call('store: full verify fact', mode='show_wrongid')
+        out = self.call('store: full verify fact', mode='show_wrongid', direct_store=True)
         self.assertIn('Saved:', out)
         self.assertIn('DIFFERENT', out)
         self.assertNotIn('verified by read-back', out)
         # 相同前 40 字但尾部被篡改 → mismatch（不再「前缀包含即全文一致」）
-        out = self.call('store: full verify fact tail', mode='show_tail')
+        out = self.call('store: full verify fact tail', mode='show_tail', direct_store=True)
         self.assertIn('DIFFERENT', out)
         self.assertNotIn('verified by read-back', out)
         # 正常全量一致 → verified（措辞如实：id、标题与完整正文）
-        out = self.call('store: full verify fact ok')
+        out = self.call('store: full verify fact ok', direct_store=True)
         self.assertIn('verified by read-back', out)
 
     def test_slow_bad_receipt_respects_shared_budget(self):
         # 慢坏回执（2.5s 后回垃圾）+ 紧张预算（4s）：不再追加 list，直接输出 unknown 禁重发
         before = self.recorded()
         out = self.call('store: slow garbage fact', mode='slow_garbage',
-                        extra_env={'RESPITE_HOOK_BUDGET_S': '4'})
+                        extra_env={'RESPITE_HOOK_BUDGET_S': '4'}, direct_store=True)
         self.assertIn('store unknown', out)
         self.assertIn('Do NOT resend', out)
         self.assertEqual(len(self.recorded()) - len(before), 1)  # 只有 remember，没有 list
@@ -409,7 +421,7 @@ else: sys.exit(1)
         # 预算随后耗尽，零追加调用。
         before = self.recorded()
         out = self.call('store: slow garbage fact', mode='slow_garbage',
-                        extra_env={'RESPITE_HOOK_BUDGET_S': '4', 'STUB_SLEEP': '6'})
+                        extra_env={'RESPITE_HOOK_BUDGET_S': '4', 'STUB_SLEEP': '6'}, direct_store=True)
         self.assertIn('store unknown', out)
         self.assertIn('timed out', out)
         self.assertIn('Do NOT resend', out)
@@ -420,7 +432,7 @@ else: sys.exit(1)
         # 直接 unknown 回执（只读核实指引 + 禁重发）
         before = self.recorded()
         out = self.call('store: no budget fact', extra_env={'RESPITE_HOOK_BUDGET_S': '2'},
-                        no_calls=True)
+                        no_calls=True, direct_store=True)
         self.assertIn('store unknown', out)
         self.assertIn('Do NOT resend', out)
         self.assertEqual(self.recorded(), before)
@@ -429,7 +441,7 @@ else: sys.exit(1)
         # 坏 schema list（details 非数组 / 无可解析时间戳）→ 不把新条目归属给本次写入
         for mode in ('list_schema', 'list_notimes'):
             before = len(self.recorded())
-            out = self.call('store: schema fact', mode='silent', list_mode=mode)
+            out = self.call('store: schema fact', mode='silent', list_mode=mode, direct_store=True)
             self.assertIn('store unknown', out, mode)
             self.assertNotIn('may already be written', out, mode)
             self.assertEqual([a[0] for a in self.recorded()][before:], ['remember', 'list'], mode)
@@ -727,14 +739,14 @@ else: sys.exit(1)
 
     def test_stop_after_hook_store_queries_nothing_but_still_nudges(self):
         # 复核⑥：磁盘凭证免催已取消——Stop 不查引擎，但也不凭旧记录免催（仍催一次）
-        self.call('store: durable fixture fact')
+        self.call('store: durable fixture fact', direct_store=True)
         before = self.recorded()
         self.assertTrue(json.loads(self.call(event='Stop'))['decision'], 'block')
         self.assertEqual(self.recorded(), before)  # 零引擎查询
 
     def test_turn_receipt_suppression_is_request_scoped(self):
         # 复核⑥：磁盘凭证免催已取消——Stop 不凭旧记录免催；同请求二次 Stop 由 latch 放行
-        self.call('store: durable fixture fact')
+        self.call('store: durable fixture fact', direct_store=True)
         self.assertTrue(json.loads(self.call(event='Stop'))['decision'] == 'block')  # 仍催
         self.assertEqual(self.call(event='Stop', active=True), '')                   # latch：同请求一次
         self.call('another ordinary input without storing')
@@ -752,7 +764,7 @@ else: sys.exit(1)
 
     def test_receipt_suppression_is_session_scoped(self):
         # 会话隔离：A 会话的写回执不免 B 会话的催存
-        self.call('store: durable fixture fact', session='a')
+        self.call('store: durable fixture fact', session='a', direct_store=True)
         self.assertEqual(json.loads(self.call(event='Stop', session='b'))['decision'], 'block')
 
     def test_malformed_spy_cannot_pass_positive_control(self):
