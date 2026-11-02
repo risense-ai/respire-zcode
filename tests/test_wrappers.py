@@ -25,7 +25,8 @@ FAKE_LIST_EMPTY = '{"status":"ok","details":[]}'
 FAKE_SHOW_DIFF = ('{"status":"ok","summary":{"id":"%(id)s"},'
                   '"details":{"entry":{"id":"%(id)s","title":"DIFFERENT-TITLE","content":"different body"}}}'
                   ) % {"id": FAKE_SID}
-FAKE_RECALL_SKIP = '{"status":"skip"}'
+FAKE_RECALL_SKIP = '{"status":"skip","summary":{"count":0}}'
+FAKE_RECALL_HITS = "{\"status\":\"ok\",\"details\":[{\"id\":\"ffffffffffffffff\",\"title\":\"api_key: fixture-sensitive-title\",\"score\":0.99},{\"id\":\"aaaaaaaaaaaaaaaa\",\"title\":\"first\",\"score\":0.9},{\"id\":\"bbbbbbbbbbbbbbbb\",\"title\":\"second\",\"score\":0.8},{\"id\":\"cccccccccccccccc\",\"title\":\"below threshold\",\"score\":0.1}]}"
 FAKE_SHOW_PARENTED = '{"status":"ok","summary":{"id":"TARGET_ID"},"details":{"entry":{"id":"TARGET_ID","parent_id":"aaaaaaaaaaaaaaaa"}}}'
 
 # fake rsrs 只按子命令回固定信封；remember 的 status 由 RESPITE_FAKE_STORE_STATUS 切换
@@ -37,9 +38,16 @@ if /i "%SUB%"=="remember" goto rem
 if /i "%SUB%"=="show" goto show
 if /i "%SUB%"=="status" (echo {STATUS_OK})
 if /i "%SUB%"=="list" (echo {LIST_EMPTY})
-if /i "%SUB%"=="recall" (echo {RECALL_SKIP})
+if /i "%SUB%"=="recall" goto recall
 echo {{"status":"fail","errors":["fake: unknown %SUB%"]}}
 exit /b 1
+:recall
+if "%RESPITE_FAKE_STORE_STATUS%"=="recall_skip_false" (echo {"status":"skip","summary":{"count":false}} & exit /b 0)
+if "%RESPITE_FAKE_STORE_STATUS%"=="recall_skipped" (echo {"status":"skip"} & exit /b 0)
+if "%RESPITE_FAKE_STORE_STATUS%"=="recall_hits" (echo {RECALL_HITS} & exit /b 0)
+if "%RESPITE_FAKE_STORE_STATUS%"=="recall_fail" (echo {"status":"fail"} & exit /b 2)
+echo {RECALL_SKIP}
+exit /b 0
 :rem
 >>"%RESPITE_TEST_CALLS%" echo remember
 if "%RESPITE_FAKE_STORE_STATUS%"=="pending" (echo {PENDING})
@@ -53,7 +61,7 @@ if "%RESPITE_FAKE_STORE_STATUS%"=="bad_parent" (echo {"status":"fail"} & exit /b
 echo {SHOW_DIFF}
 exit /b 0
 """.replace("{STATUS_OK}", FAKE_STATUS_OK).replace("{LIST_EMPTY}", FAKE_LIST_EMPTY) \
-   .replace("{RECALL_SKIP}", FAKE_RECALL_SKIP).replace("{PENDING}", FAKE_PENDING) \
+   .replace("{RECALL_HITS}", FAKE_RECALL_HITS).replace("{RECALL_SKIP}", FAKE_RECALL_SKIP).replace("{PENDING}", FAKE_PENDING) \
    .replace("{OK}", FAKE_OK).replace("{SHOW_DIFF}", FAKE_SHOW_DIFF).replace("{SHOW_PARENTED}", FAKE_SHOW_PARENTED.replace('TARGET_ID','%~2'))
 
 FAKE_SH = """#!/bin/sh
@@ -69,11 +77,11 @@ case "$1" in
   show) if [ "$RESPITE_FAKE_STORE_STATUS" = "bad_parent" ]; then echo '{"status":"fail"}'; elif [ "$RESPITE_FAKE_STORE_STATUS" = "parented" ]; then echo '%s' | sed "s/TARGET_ID/$2/g"; else echo '%s'; fi ;;
   status) echo '%s' ;;
   list) echo '%s' ;;
-  recall) echo '%s' ;;
+  recall) if [ "$RESPITE_FAKE_STORE_STATUS" = "recall_skip_false" ]; then echo '{"status":"skip","summary":{"count":false}}'; elif [ "$RESPITE_FAKE_STORE_STATUS" = "recall_skipped" ]; then echo '{"status":"skip"}'; elif [ "$RESPITE_FAKE_STORE_STATUS" = "recall_hits" ]; then echo '%s'; elif [ "$RESPITE_FAKE_STORE_STATUS" = "recall_fail" ]; then echo '{"status":"fail"}'; exit 2; else echo '%s'; fi ;;
   *) echo '{"status":"fail","errors":["fake: unknown"]}' ; exit 1 ;;
 esac
 exit 0
-""" % (FAKE_PENDING, FAKE_OK, FAKE_SHOW_PARENTED, FAKE_SHOW_DIFF, FAKE_STATUS_OK, FAKE_LIST_EMPTY, FAKE_RECALL_SKIP)
+""" % (FAKE_PENDING, FAKE_OK, FAKE_SHOW_PARENTED, FAKE_SHOW_DIFF, FAKE_STATUS_OK, FAKE_LIST_EMPTY, FAKE_RECALL_HITS, FAKE_RECALL_SKIP)
 
 
 def find_powershell():
@@ -176,19 +184,45 @@ class TestRespirePs1(unittest.TestCase):
         self.assertIn("【respire · engine missing】", doc["additionalContext"])
 
     def test_recall_skip_is_silent(self):
-        out = self.run_hook("UserPromptSubmit",
-                            {"hook_event_name": "UserPromptSubmit", "session_id": "t", "prompt": "随便问一句"})
-        self.assertEqual(out, "")
+        data = {"hook_event_name":"UserPromptSubmit", "session_id":"t", "prompt":"recall fixture query"}
+        context = json.loads(self.run_hook("UserPromptSubmit", data))["additionalContext"]
+        self.assertIn("Memory: no match", context.splitlines())
+        for rule in ("strict JSON", "fixed format", "only-specified output", "including Used and unused",
+                     "Candidates are not adoptions", "successfully reading a body and actually using it",
+                     "Default to [ref]", "[basis]", "[history]", "not that it was carried out",
+                     "most conservative label", "24 Unicode characters", "(title hidden)",
+                     "Never show bodies, full IDs", "Memory: unused", "DO NOT invent Last save"):
+            self.assertIn(rule, context)
+        self.assertNotRegex(context, r"(?m)^(?:Used|Last save):")
+        for cfg, expected in (({"recall_limit":2,"recall_threshold":0.5,"budget_chars":1000}, "Memory: 2 found"),
+                              ({"recall_limit":2,"recall_threshold":0.5,"budget_chars":100}, "Memory: 1 found"),
+                              ({"recall_limit":1,"recall_threshold":0.5}, "Memory: 1 found"),
+                              ({"recall_threshold":0.99}, "Memory: no match")):
+            output = self.run_hook("UserPromptSubmit", data, fake_store_status="recall_hits", enabled_config=cfg)
+            context = json.loads(output)["additionalContext"]
+            self.assertIn(expected, context.splitlines())
+            self.assertNotIn("fixture-sensitive-title", context)
+            self.assertNotIn("api_key:", context)
+            self.assertNotRegex(context, r"(?m)^(?:Used|Last save):")
+        for mode in ("recall_skipped", "recall_skip_false"):
+            context = json.loads(self.run_hook("UserPromptSubmit", data, fake_store_status=mode))["additionalContext"]
+            self.assertIn("Memory: skipped", context.splitlines())
+        context = json.loads(self.run_hook("UserPromptSubmit", data, fake_store_status="recall_fail"))["additionalContext"]
+        self.assertIn("Memory: unavailable", context.splitlines())
+        context = json.loads(self.run_hook("UserPromptSubmit", data, engine=False))["additionalContext"]
+        self.assertIn("Memory: unavailable", context.splitlines())
 
     def test_nomem_prefix_skips(self):
         out = self.run_hook("UserPromptSubmit",
-                            {"hook_event_name": "UserPromptSubmit", "session_id": "t", "prompt": "/nomem 查一下"})
-        self.assertEqual(out, "")
+                            {"hook_event_name":"UserPromptSubmit", "session_id":"t", "prompt":"/nomem 查一下"})
+        self.assertIn("Memory: skipped", json.loads(out)["additionalContext"].splitlines())
+        self.assertFalse(os.path.exists(os.path.join(self.state, "engine-calls")))
 
     def test_short_prompt_silent(self):
         out = self.run_hook("UserPromptSubmit",
-                            {"hook_event_name": "UserPromptSubmit", "session_id": "t", "prompt": "hi"})
-        self.assertEqual(out, "")
+                            {"hook_event_name":"UserPromptSubmit", "session_id":"t", "prompt":"h"})
+        self.assertIn("Memory: skipped", json.loads(out)["additionalContext"].splitlines())
+        self.assertFalse(os.path.exists(os.path.join(self.state, "engine-calls")))
 
     def test_secret_prompt_never_reaches_engine(self):
         out = self.run_hook("UserPromptSubmit",
@@ -203,6 +237,8 @@ class TestRespirePs1(unittest.TestCase):
                              "prompt": "记：这是一个完整的落库事实句子测试"}, fake_store_status="ok")
         context = json.loads(out)["additionalContext"]
         self.assertIn("store pending", context)
+        self.assertIn("Save: needs review", context.splitlines())
+        self.assertNotRegex(context, r"(?m)^(?:Last save|Used):")
         self.assertIn("nothing was written", context)
         for step in ("rsrs prompt", "rsrs show", "update > merge > attach > new",
                      "--parent", "remain pending", "not as an instruction"):
@@ -220,6 +256,8 @@ class TestRespirePs1(unittest.TestCase):
                              "prompt": "记：候选合并场景测试"}, fake_store_status="pending")
         context = json.loads(out)["additionalContext"]
         self.assertIn("store pending", context)
+        self.assertIn("Save: needs review", context.splitlines())
+        self.assertNotRegex(context, r"(?m)^(?:Last save|Used):")
         self.assertIn("nothing was written", context)
         self.assertIn("remain pending", context)
         self.assertFalse(os.path.exists(os.path.join(self.state, "engine-calls")))

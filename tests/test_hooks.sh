@@ -286,14 +286,14 @@ check "注入为标题档无正文" "$out" "不含:｜"
 check "默认直出无阈值拦截" "$out" "含:rsrs direct"
 check "召回头行与条数一致" "$(printf '%s' "$out" | python3 -c '
 import re,json,sys
-s=json.loads(sys.stdin.read())["additionalContext"]; head=s.split("\n",1)[0]
+s=json.loads(sys.stdin.read())["additionalContext"]; head=s
 n=sum(1 for l in s.split("\n") if l.startswith("- ["))
 m=re.search(r"matched (\d+) item",head)
 print("OK" if m and int(m.group(1))==n else "BAD")')" "含:OK"
 
-check "无关 prompt 不注入(引擎skip门,确定性桩)" "$(run_stub UserPromptSubmit '{"hook_event_name": "UserPromptSubmit", "prompt": "今晚吃什么菜好呢", "session_id": "selftest"}' rec_skip)" "空"
-check "单字 prompt 跳过" "$(run UserPromptSubmit "嗯")" "空"
-check "/nomem 关闭召回" "$(run UserPromptSubmit "/nomem rsrs 信封结构")" "空"
+check "无关 prompt 不注入(引擎skip门,确定性桩)" "$(run_stub UserPromptSubmit '{"hook_event_name": "UserPromptSubmit", "prompt": "今晚吃什么菜好呢", "session_id": "selftest"}' rec_skip)" "含:Memory: no match"
+check "单字 prompt 跳过" "$(run UserPromptSubmit "嗯")" "含:Memory: skipped"
+check "/nomem 关闭召回" "$(run UserPromptSubmit "/nomem rsrs 信封结构")" "含:Memory: skipped"
 # 合成凭据守卫（审计回归）：凭据轮须零引擎调用（recall/remember 均不发）、hook.log 与
 # 注入输出均不得含合成值。合成值运行时拼接——仓库不出现 sk-<16+位> 字面量，
 # 分发前静态扫描（scripts/validate_plugin.py）本体未动。引擎桩另作「正常轮确实会过引擎」的对照，

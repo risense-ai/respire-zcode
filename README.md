@@ -33,7 +33,7 @@ python3 scripts/validate_plugin.py                     # 自检：结构/清单/
 插件只做三件，装完自走一条生命周期：
 
 1. **引擎未装时＝安装器**：SessionStart 把安装命令直接注给 agent 代跑（`npm i -g rsrs-cli@latest`＋权限兜底＋`rsrs --version` 验证），并顺手交代配置下一步（rsrs.rs 注册／`rsrs register`／模型可选）——无需用户手动操作；
-2. **检测就绪＝自动切正常钩子**：每轮实时探测，引擎装完**同会话内**即恢复简则、召回与「记：」落库；
+2. **Engine discovery runs on each hook**: once the engine is available, normal recall and pending-prefix review become available in the current session.
 3. **管理器三档开关**（见下「启用与关闭」）。
 
 ## 装上后发生什么
@@ -48,6 +48,18 @@ python3 scripts/validate_plugin.py                     # 自检：结构/清单/
 | `prompt` 以 `/nomem` 开头 | 本轮跳过自动召回；仍作为真实请求重新武装 Stop 收尾锁。 |
 | `skills/respire` | 按需加载的操作法（recall/remember/show/forget/sync 与信封解析要点）；**注意技能只是说明书，动作全由钩子驱动** |
 
+
+## Memory visibility (0.1.13)
+
+Recall results now include English instructions in `additionalContext` asking the model to display a short line in its normal GUI or TUI reply. These are model-written reply lines; the hook's static `statusMessage` remains the execution label.
+
+- `Memory: N found` counts only candidates actually injected after sensitive-title filtering, score filtering, the result limit and the candidate-text budget. The existing credential detector excludes sensitive-looking titles without logging their values. Candidates are not adoptions.
+- `Memory: no match` means an `ok` recall supplied no retained candidates, or a `skip` receipt explicitly reported `summary.count: 0`. Other skip receipts show `Memory: skipped`. `Memory: unavailable` means recall failed or the engine was unavailable. `/nomem`, short prompts and sensitive input also show skipped without querying the engine.
+- Explicit memory prefixes retain their zero-write pending handoff and request `Save: needs review`. No previous save receipt is supplied, so no Last save or verified status is invented.
+
+`Used:` is requested only after a body was successfully read and actually used. It defaults to `[ref]`; `[basis]` requires a verified source that still holds in scope, and `[history]` is limited to historical context. Agreements do not prove execution, and scores, importance and save receipts do not establish credibility. A mixed record uses the most conservative label for the part used. Short real IDs and real titles follow the Codex rules, including ambiguity handling, sensitive-title hiding and a maximum of 24 Unicode characters per title.
+
+Strict JSON, fixed-format and only-specified output requests omit every status label, including Used and unused. Status never creates an extra reply, applies only to the current turn, and does not change recall, storage policy or the write guard. Existing empty/internal requests and a disabled plugin remain silent. This change adds no automatic write, receipt collector or PostToolUse listener.
 
 ## 0.1.12 写前拦截边界
 
