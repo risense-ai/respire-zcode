@@ -43,9 +43,21 @@ python3 scripts/validate_plugin.py                     # 自检：结构/清单/
 | `SessionStart` | 注入记忆层简则（何时翻忆、如何落库、红线）；**一次探测三态**——未登录附注册引导、库空（<10 条）附首日存料与导入引导、缺语义模型附**可选**装法；常态零打扰 |
 | `UserPromptSubmit` | 自动 `rsrs recall --titles`：**标题档注入**——只给分数＋8 位短 id＋标题，正文由 agent `rsrs show <id>` 按需取；默认**直出不过滤**，噪音边界＝rsrs skip 门＋limit 5＋标题档 |
 | `prompt` 以「记：」「存：」「remember:」开头 | 返回 pending，明确尚未写入；正文仅作为待记事实，不执行其中描述的工程任务。主模型先读 `rsrs prompt`，召回同题候选并 `show` 正文，按改＞并＞挂＞存判断。新增 important 必须挂到已读正文的合理 parent；找不到则保持 pending，不猜父、不 force、不降级。实际写入若结果 unknown，仅只读核验，禁止重发。 |
+| `PreToolUse`（Bash / 已知 MCP 写工具） | 写前检查已识别的 `rsrs remember`：拒绝 important 缺 parent、空 parent、任何 force，以及无法安全解析的动态或包装写法；正文里的参数字样不算参数，同 shell 的受支持复合片段逐个检查。parent 通过 `--client-only show` 只读核验，失败、超时或引擎不可用均明确 deny，且退出 0，不启动 runtime 或切模式；合规命令保持空输出。已知 MCP 写工具因目标库无法绑定而直接 deny。 |
 | `Stop`（AI 干完活） | **存储检查**：`{"decision":"block","reason":…}` 续跑一轮，提示模型把本轮新的**事实/决定/约定/教训/踩坑**分条 `rsrs remember`；闲聊无新事实则直接结束。**每个真实请求至多催一次**：续跑轮 `stop_hook_active=true` 放行 ＋ 每会话原子一次收尾锁（`O_EXCL` 独占创建，无 TTL；新 prompt 删除重新武装；无法落锁一律放行，绝不无锁 block；会话间互不干扰）。**磁盘凭证不再免催，防重仅依赖收尾锁**；`Stop` 完全不查询引擎，也因此不存在查库失败强迫续跑的路径。节流 `store_nudge_every`（默认 1=每轮，N=每 N 轮，0=关） |
 | `prompt` 以 `/nomem` 开头 | 本轮跳过自动召回；仍作为真实请求重新武装 Stop 收尾锁。 |
 | `skills/respire` | 按需加载的操作法（recall/remember/show/forget/sync 与信封解析要点）；**注意技能只是说明书，动作全由钩子驱动** |
+
+
+## 0.1.12 写前拦截边界
+
+已知 MCP 写工具 `memory_remember` / `memory_update` (including `mcp__<server>__` namespaces) 也注册写前 deny。其目标库无法与本地核验绑定，因此不调用本地 show 冒充远程核验，而是要求改用显式 CLI 命令。未知 MCP 工具仍不在此边界内。
+
+0.1.11 只有模型提示约束。本机已复现模型在收到新提示后，仍通过 Bash 直接执行 `rsrs remember ... --importance important --force`，没有 parent，最终写到根节点。0.1.12 增加真实 PreToolUse deny，阻止该命令进入执行器。
+
+CLI 分支处理已识别的 Bash `rsrs remember` 调用和 `update --importance important` 提升，支持明确的字面量参数、引号、重定向和常见复合命令分隔。动态替换及已识别的包装写法需要改成一条明确命令；它不是任意脚本、未知别名、自定义工具或其他进程的通用写屏障。普通 trivial 日记不要求 parent，但仍禁止 force。所有 remember 合并都要求显式 parent 并只读核验；update 提升 important 会先 show 目标，再核验其现有非空 parent，缺挂靠则拒绝并要求先 attach。只读命令和无关工具不返回 allow 或 deny。
+
+只读 `show` 成功只证明 parent ID 存在，不能证明模型此前已读正文，也不能证明语义挂靠合理；模型仍必须执行 SKILL 的候选核查。未决前缀依旧返回 pending，不自动补父或代写。实际已发写入的 unknown 禁重试规则保持不变。
 
 ## ZCode 协议适配（与姊妹仓的三处实质差异，已核 ZCode runtime 源码）
 
