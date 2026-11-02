@@ -368,6 +368,7 @@ else: sys.exit(1)
         for suffix in (metadata, ' --clear-summary --clear-source-refs --clear-valid-until --clear-review-at --clear-artifact'):
             self.assertEqual(self.call(event='PreToolUse', guard_command='>out.log rsrs remember fact --importance important --parent dddddddddddddddd' + suffix, guard_parent='dddddddddddddddd'), '')
         for command in ('rsrs >out.log remember fact --importance important --parent dddddddddddddddd',
+                        'rsrs remember fact --emotion 1 >out.log --importance important --parent dddddddddddddddd',
                         'rsrs remember ">" --importance important --parent dddddddddddddddd',
                         'rsrs remember fact --merge-ids eeeeeeeeeeeeeeee --parent dddddddddddddddd'):
             self.assertEqual(self.call(event='PreToolUse', guard_command=command, guard_parent='dddddddddddddddd'), '')

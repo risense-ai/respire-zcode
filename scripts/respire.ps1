@@ -858,7 +858,7 @@ function Invoke-DoRecall([string]$engine, [string]$prompt, [hashtable]$cfg) {
 function Get-BashTokens([string]$command) {
     $tokens = New-Object 'System.Collections.Generic.List[object]'
     $word = New-Object Text.StringBuilder
-    $quote = ''; $started = $false; $dynamic = $false
+    $quote = ''; $started = $false; $dynamic = $false; $quoted = $false
     for ($i = 0; $i -lt $command.Length; $i++) {
         $ch = [string]$command[$i]
         if ($quote -eq "'") {
@@ -866,6 +866,7 @@ function Get-BashTokens([string]$command) {
         } elseif ($ch -eq '\') {
             if ($i + 1 -ge $command.Length) { throw 'unfinished escape' }
             $next = [string]$command[$i + 1]
+            if ($next -ne "`n") { $quoted=$true }
             if (-not $quote -or $next -in @('"', '\', '$', [string][char]96, "`n")) {
                 if ($next -ne "`n") { [void]$word.Append($next); $started = $true }
                 $i++
@@ -877,13 +878,15 @@ function Get-BashTokens([string]$command) {
                 [void]$word.Append($ch)
             }
         } elseif ($ch -in @("'", '"')) {
-            $quote = $ch; $started = $true
+            $quote = $ch; $started = $true; $quoted=$true
         } elseif ($ch -eq '#' -and -not $started) {
             while ($i + 1 -lt $command.Length -and $command[$i + 1] -ne "`n") { $i++ }
         } elseif ([char]::IsWhiteSpace($command[$i]) -or $ch -in @(';', '&', '|', '<', '>', '(', ')')) {
             if ($started) {
-                $tokens.Add([pscustomobject]@{ Value=$word.ToString(); Dynamic=$dynamic; Operator=$false })
-                [void]$word.Clear(); $started=$false; $dynamic=$false
+                $value=$word.ToString()
+                $fd=($ch -in @('<','>') -and $value -match '^\d+$' -and -not $quoted)
+                $tokens.Add([pscustomobject]@{ Value=$value; Dynamic=$dynamic; Operator=$fd })
+                [void]$word.Clear(); $started=$false; $dynamic=$false; $quoted=$false
             }
             if ($ch -eq "`n" -or $ch -in @(';', '&', '|', '<', '>', '(', ')')) {
                 $operator = $ch
@@ -909,7 +912,7 @@ function Get-RememberSegments([string]$command) {
         $clean=New-Object 'System.Collections.Generic.List[object]'
         $redirects=@('>','>>','>&','<','<&')
         for ($i=0; $i -lt $parts.Count; $i++) {
-            if ($parts[$i].Value -match '^\d+$' -and $i+1 -lt $parts.Count -and $parts[$i+1].Operator -and $parts[$i+1].Value -cin $redirects) { $i++ }
+            if ($parts[$i].Operator -and $parts[$i].Value -match '^\d+$' -and $i+1 -lt $parts.Count -and $parts[$i+1].Operator -and $parts[$i+1].Value -cin $redirects) { $i++ }
             if ($parts[$i].Operator -and $parts[$i].Value -cin $redirects) {
                 if ($i+1 -ge $parts.Count -or $parts[$i+1].Operator -or $parts[$i+1].Dynamic) { throw 'opaque redirection' }
                 $i++; continue
@@ -939,7 +942,7 @@ function Get-RememberSegments([string]$command) {
     for ($position=0; $position -lt $tokens.Count; $position++) {
         $token=$tokens[$position]
         if ($token.Dynamic -and $token.Value.StartsWith([string][char]96)) {
-            $tail=@($tokens | Select-Object -Skip $position | ForEach-Object { [pscustomobject]@{Value=$_.Value.Trim([char]96)} })
+            $tail=@($tokens | Select-Object -Skip $position | ForEach-Object { [pscustomobject]@{Value=$_.Value.Trim([char]96); Dynamic=$_.Dynamic; Operator=$_.Operator} })
             if (Test-LiteralWrite $tail 0) { throw 'command substitution memory write' }
         }
         if ($token.Dynamic -and ($token.Value.Contains('$(') -or $token.Value.Contains([string][char]96))) {

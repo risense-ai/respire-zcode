@@ -305,11 +305,12 @@ class TestRespirePs1(unittest.TestCase):
             self.assertEqual(self.run_hook('PreToolUse', {'tool_name':'Bash','tool_input':{'command':'rsrs ' + prefix + ' remember "fact" --importance important --parent ' + FAKE_SID}}), '')
         self.assertEqual(self.run_hook('PreToolUse', {'tool_name':'Bash','tool_input':{'command':command}}), '')
         for wrapped in ('rsrs >out.log remember fact --importance important --parent ' + FAKE_SID,
+                        'rsrs remember fact --emotion 1 >out.log --importance important --parent ' + FAKE_SID,
                         'rsrs remember ">" --importance important --parent ' + FAKE_SID,
                         'rsrs remember fact --merge-ids aaaaaaaaaaaaaaaa --parent ' + FAKE_SID):
             self.assertEqual(self.run_hook('PreToolUse', {'tool_name':'Bash','tool_input':{'command':wrapped}}), '')
         with open(os.path.join(self.state, 'engine-calls'), encoding='utf-8') as calls:
-            self.assertEqual(calls.read().splitlines(), ['show'] * 10)
+            self.assertEqual(calls.read().splitlines(), ['show'] * 11)
         promotion='rsrs update ' + FAKE_SID + ' --importance important --content "updated fact"'
         denied=json.loads(self.run_hook('PreToolUse', {'tool_name':'Bash','tool_input':{'command':promotion}}))
         self.assertEqual(denied['hookSpecificOutput']['permissionDecision'], 'deny')

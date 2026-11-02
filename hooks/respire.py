@@ -888,7 +888,7 @@ def on_stop(data: dict, cfg: dict, engine):
 def _bash_tokens(command: str) -> list:
     """Tokenize literal Bash words and control operators, without evaluating input."""
     tokens, word = [], []
-    quote, started, dynamic = "", False, False
+    quote, started, dynamic, quoted = "", False, False, False
     i = 0
     while i < len(command):
         char = command[i]
@@ -901,6 +901,7 @@ def _bash_tokens(command: str) -> list:
             if i + 1 >= len(command):
                 raise ValueError("unfinished escape")
             following = command[i + 1]
+            quoted |= following != "\n"
             if not quote or following in ('"', "\\", "$", chr(96), "\n"):
                 if following != "\n":
                     word.append(following)
@@ -915,14 +916,16 @@ def _bash_tokens(command: str) -> list:
                 dynamic |= char in ("$", chr(96))
                 word.append(char)
         elif char in ("'", '"'):
-            quote, started = char, True
+            quote, started, quoted = char, True, True
         elif char == "#" and not started:
             while i + 1 < len(command) and command[i + 1] != "\n":
                 i += 1
         elif char.isspace() or char in ";&|<>()":
             if started:
-                tokens.append(("".join(word), dynamic, False))
-                word, started, dynamic = [], False, False
+                value = "".join(word)
+                fd = char in "<>" and value.isdigit() and not quoted
+                tokens.append((value, dynamic, fd))
+                word, started, dynamic, quoted = [], False, False, False
             if char == "\n" or char in ";&|<>()":
                 operator = char
                 if i + 1 < len(command) and (
@@ -951,7 +954,7 @@ def _remember_segments(command: str) -> list:
         clean, i = [], 0
         redirects = (">", ">>", ">&", "<", "<&")
         while i < len(parts):
-            if (parts[i][0].isdigit() and i + 1 < len(parts)
+            if (parts[i][2] and parts[i][0].isdigit() and i + 1 < len(parts)
                     and parts[i + 1][2] and parts[i + 1][0] in redirects):
                 i += 1
             if parts[i][2] and parts[i][0] in redirects:
