@@ -39,7 +39,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash|mcp__respire__memory_remember",
+        "matcher": "^(?:Bash|(?:mcp__.+__)?memory_(?:remember|update))$",
         "hooks": [
           {
             "type": "command",

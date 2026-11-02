@@ -51,7 +51,7 @@ python3 scripts/validate_plugin.py                     # 自检：结构/清单/
 
 ## 0.1.12 写前拦截边界
 
-已知 MCP 写工具 `mcp__respire__memory_remember` 也注册写前 deny。其目标库无法与本地核验绑定，因此不调用本地 show 冒充远程核验，而是要求改用显式 CLI 命令。未知 MCP 工具仍不在此边界内。
+已知 MCP 写工具 `memory_remember` / `memory_update` (including `mcp__<server>__` namespaces) 也注册写前 deny。其目标库无法与本地核验绑定，因此不调用本地 show 冒充远程核验，而是要求改用显式 CLI 命令。未知 MCP 工具仍不在此边界内。
 
 0.1.11 只有模型提示约束。本机已复现模型在收到新提示后，仍通过 Bash 直接执行 `rsrs remember ... --importance important --force`，没有 parent，最终写到根节点。0.1.12 增加真实 PreToolUse deny，阻止该命令进入执行器。
 

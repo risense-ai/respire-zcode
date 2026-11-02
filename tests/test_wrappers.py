@@ -316,17 +316,24 @@ class TestRespirePs1(unittest.TestCase):
         self.assertEqual(denied['hookSpecificOutput']['permissionDecision'], 'deny')
         self.assertIn('attach', denied['hookSpecificOutput']['permissionDecisionReason'])
         self.assertEqual(self.run_hook('PreToolUse', {'tool_name':'Bash','tool_input':{'command':promotion}}, fake_store_status='parented'), '')
+        for promotion in ('rsrs update --importance important ' + FAKE_SID, 'rsrs update --importance=important ' + FAKE_SID):
+            denied=json.loads(self.run_hook('PreToolUse', {'tool_name':'Bash','tool_input':{'command':promotion}}))
+            self.assertEqual(denied['hookSpecificOutput']['permissionDecision'], 'deny')
+            self.assertEqual(self.run_hook('PreToolUse', {'tool_name':'Bash','tool_input':{'command':promotion}}, fake_store_status='parented'), '')
         denied=json.loads(self.run_hook('PreToolUse', {'tool_name':'Bash','tool_input':{'command':promotion}}, fake_store_status='parented_bad'))
         self.assertEqual(denied['hookSpecificOutput']['permissionDecision'], 'deny')
         self.assertEqual(self.run_hook('PreToolUse', {'tool_name':'Bash','tool_input':{'command':'rsrs update ' + FAKE_SID + ' --importance trivial'}}), '')
         denied = json.loads(self.run_hook('PreToolUse', {'tool_name':'Bash','tool_input':{'command':command}}, fake_store_status='bad_parent'))
         self.assertEqual(denied['hookSpecificOutput']['permissionDecision'], 'deny')
         self.assertEqual(self.run_hook('PreToolUse', {'tool_name':'Read','tool_input':{'command':command}}), '')
-        self.assertEqual(self.run_hook('PreToolUse', {'tool_name':'mcp__other__memory_remember','tool_input':{'content':'fact'}}), '')
+        self.assertEqual(self.run_hook('PreToolUse', {'tool_name':'mcp__other__memory_recall','tool_input':{'content':'fact'}}), '')
         with open(os.path.join(self.state, 'engine-calls'), encoding='utf-8') as calls:
             before = calls.read()
         for args in ({'content':'fact','importance':'important','force':True}, {'content':'fact','importance':'important','parent':FAKE_SID}):
             denied = json.loads(self.run_hook('PreToolUse', {'tool_name':'mcp__respire__memory_remember','tool_input':args}))
+            self.assertEqual(denied['hookSpecificOutput']['permissionDecision'], 'deny')
+        for tool in ('memory_remember','mcp__rsrs__memory_remember','memory_update','mcp__rsrs__memory_update'):
+            denied=json.loads(self.run_hook('PreToolUse', {'tool_name':tool,'tool_input':{'content':'fact'}}))
             self.assertEqual(denied['hookSpecificOutput']['permissionDecision'], 'deny')
         with open(os.path.join(self.state, 'engine-calls'), encoding='utf-8') as calls:
             self.assertEqual(calls.read(), before)

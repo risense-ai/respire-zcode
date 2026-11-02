@@ -1052,9 +1052,7 @@ def _remember_segments(command: str) -> list:
 def _memory_write_parent(args: list, action="remember"):
     if "--help" in args or "-h" in args:
         return None
-    target = args[0] if action == "update" and args else None
-    if action == "update":
-        args = args[1:]
+    positional = []
     importance, parent = "trivial", None
     seen, i = set(), 0
     while i < len(args):
@@ -1080,10 +1078,13 @@ def _memory_write_parent(args: list, action="remember"):
                 parent = value
         elif name.startswith("-") and name not in ("--json", "--client-only", "--clear-summary", "--clear-source-refs", "--clear-valid-until", "--clear-review-at", "--clear-artifact"):
             raise ValueError("unsupported write option")
+        elif not name.startswith("-"):
+            positional.append(argument)
         i += 1
     if action == "update":
         if importance != "important":
             return None
+        target = positional[0] if len(positional) == 1 else None
         if not isinstance(target, str) or not re.fullmatch(r"(?:[a-fA-F0-9]{8,64}|[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12})", target):
             raise ValueError("invalid update target")
         return {"target": target}
@@ -1099,6 +1100,10 @@ def _memory_write_parent(args: list, action="remember"):
 def _guard_deny(reason: str) -> dict:
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
             "permissionDecision": "deny", "permissionDecisionReason": reason}}
+
+
+def _is_mcp_memory_write(tool) -> bool:
+    return bool(re.fullmatch(r"(?:mcp__.+__)?memory_(?:remember|update)", str(tool or ""), re.I))
 
 
 def _guard_entry(engine, requested: str, deadline: float):
@@ -1121,7 +1126,7 @@ def _guard_entry(engine, requested: str, deadline: float):
 
 
 def on_pre_tool_use(data: dict, cfg: dict, engine):
-    if str(data.get("tool_name") or "").lower() == "mcp__respire__memory_remember":
+    if _is_mcp_memory_write(data.get("tool_name")):
         log_event(cfg, "pretool", "deny_unbound_mcp")
         return _guard_deny("Respire blocked this MCP memory write because its target store cannot be bound to the local read-only parent check. Nothing was authorized. Use one explicit rsrs remember command with a verified parent; keep placement pending if unavailable. DO NOT switch tools to bypass this guard.")
     if str(data.get("tool_name") or "").lower() != "bash":
@@ -1283,7 +1288,7 @@ def main() -> None:
         out = ""
         tool_input = data.get("tool_input") if isinstance(data, dict) else None
         command = tool_input.get("command") if isinstance(tool_input, dict) else None
-        if (event == "PreToolUse" and (str(data.get("tool_name") or "").lower() == "mcp__respire__memory_remember"
+        if (event == "PreToolUse" and (_is_mcp_memory_write(data.get("tool_name"))
                 or (str(data.get("tool_name") or "").lower() == "bash"
                     and isinstance(command, str) and re.search(r"\brsrs\b", command, re.I)
                     and re.search(r"\b(?:remember|update)\b", command)))):

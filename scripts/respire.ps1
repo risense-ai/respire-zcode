@@ -1008,8 +1008,7 @@ function Get-RememberSegments([string]$command) {
 
 function Get-MemoryWriteParent([string[]]$arguments, [string]$action='remember') {
     if ($arguments -ccontains '--help' -or $arguments -ccontains '-h') { return $null }
-    $target=$null
-    if ($action -ceq 'update') { if ($arguments.Count) { $target=$arguments[0] }; $arguments=@($arguments | Select-Object -Skip 1) }
+    $positional=New-Object 'System.Collections.Generic.List[string]'
     $importance='trivial'; $parent=$null; $seen=@{}
     for ($i=0; $i -lt $arguments.Count; $i++) {
         $pair=$arguments[$i] -split '=',2; $name=$pair[0]
@@ -1026,10 +1025,14 @@ function Get-MemoryWriteParent([string[]]$arguments, [string]$action='remember')
             }
             if ($key -ceq '--importance') { $importance=$value }
             elseif ($key -ceq '--parent') { $parent=$value }
-        } elseif ($name.StartsWith('-') -and $name -cnotin @('--json','--client-only','--clear-summary','--clear-source-refs','--clear-valid-until','--clear-review-at','--clear-artifact')) { throw 'unsupported write option' }
+        } elseif ($name.StartsWith('-') -and $name -cnotin @('--json','--client-only','--clear-summary','--clear-source-refs','--clear-valid-until','--clear-review-at','--clear-artifact')) {
+            throw 'unsupported write option'
+        } elseif (-not $name.StartsWith('-')) { $positional.Add($arguments[$i]) }
     }
     if ($action -ceq 'update') {
         if ($importance -cne 'important') { return $null }
+        $target=$null
+        if ($positional.Count -eq 1) { $target=$positional[0] }
         if ($target -isnot [string] -or $target -cnotmatch '^(?:[a-fA-F0-9]{8,64}|[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12})$') { throw 'invalid update target' }
         return @{target=$target}
     }
@@ -1041,6 +1044,10 @@ function Get-MemoryWriteParent([string[]]$arguments, [string]$action='remember')
 
 function New-GuardDeny([string]$reason) {
     return @{ hookSpecificOutput=@{ hookEventName='PreToolUse'; permissionDecision='deny'; permissionDecisionReason=$reason } }
+}
+
+function Test-McpMemoryWrite([string]$tool) {
+    return ($tool -imatch '^(?:mcp__.+__)?memory_(?:remember|update)$')
 }
 
 function Get-GuardEntry([string]$engine, [string]$requested, [double]$deadline) {
@@ -1059,7 +1066,7 @@ function Get-GuardEntry([string]$engine, [string]$requested, [double]$deadline) 
 }
 
 function Invoke-PreToolUse([hashtable]$data, [hashtable]$cfg, [string]$engine) {
-    if ([string]$data['tool_name'] -ieq 'mcp__respire__memory_remember') {
+    if (Test-McpMemoryWrite ([string]$data['tool_name'])) {
         Write-HookLog $cfg 'pretool' 'deny_unbound_mcp'
         return New-GuardDeny 'Respire blocked this MCP memory write because its target store cannot be bound to the local read-only parent check. Nothing was authorized. Use one explicit rsrs remember command with a verified parent; keep placement pending if unavailable. DO NOT switch tools to bypass this guard.'
     }
@@ -1285,7 +1292,7 @@ try {
         $out = ''
         try {
             $command = $data['tool_input'].command
-            if ($ev -eq 'PreToolUse' -and ([string]$data['tool_name'] -ieq 'mcp__respire__memory_remember' -or ([string]$data['tool_name'] -ieq 'Bash' -and $command -is [string] -and $command -match '(?i)\brsrs\b' -and $command -match '\b(?:remember|update)\b'))) {
+            if ($ev -eq 'PreToolUse' -and ((Test-McpMemoryWrite ([string]$data['tool_name'])) -or ([string]$data['tool_name'] -ieq 'Bash' -and $command -is [string] -and $command -match '(?i)\brsrs\b' -and $command -match '\b(?:remember|update)\b'))) {
                 $out = New-GuardDeny 'Respire could not safely validate this memory write. Nothing was authorized; keep placement pending and use one explicit literal command.'
             }
         } catch { }

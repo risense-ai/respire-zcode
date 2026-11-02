@@ -377,6 +377,10 @@ else: sys.exit(1)
         self.assertEqual(denied['hookSpecificOutput']['permissionDecision'], 'deny')
         self.assertIn('attach', denied['hookSpecificOutput']['permissionDecisionReason'])
         self.assertEqual(self.call(event='PreToolUse', guard_command=command, guard_parent=['dddddddddddddddd','aaaaaaaaaaaaaaaa'], mode='show_parented'), '')
+        for promotion in ('rsrs update --importance important dddddddddddddddd', 'rsrs update --importance=important dddddddddddddddd'):
+            denied = json.loads(self.call(event='PreToolUse', guard_command=promotion, guard_parent='dddddddddddddddd'))
+            self.assertEqual(denied['hookSpecificOutput']['permissionDecision'], 'deny')
+            self.assertEqual(self.call(event='PreToolUse', guard_command=promotion, guard_parent=['dddddddddddddddd','aaaaaaaaaaaaaaaa'], mode='show_parented'), '')
         denied = json.loads(self.call(event='PreToolUse', guard_command=command, guard_parent=['dddddddddddddddd','aaaaaaaaaaaaaaaa'], mode='show_parented_bad'))
         self.assertEqual(denied['hookSpecificOutput']['permissionDecision'], 'deny')
         self.assertEqual(self.call(event='PreToolUse', guard_command='rsrs update dddddddddddddddd --importance trivial'), '')
@@ -391,10 +395,13 @@ else: sys.exit(1)
                                   extra_env={'RESPITE_HOOK_BUDGET_S':'1'}))
         self.assertEqual(out['hookSpecificOutput']['permissionDecision'], 'deny')
         self.assertEqual(self.call(event='PreToolUse', guard_command=command, guard_tool='Read'), '')
-        self.assertEqual(self.call(event='PreToolUse', guard_command=command, guard_tool='mcp__other__memory_remember'), '')
-        denied = json.loads(self.call(event='PreToolUse', guard_tool='mcp__respire__memory_remember'))
-        self.assertEqual(denied['hookSpecificOutput']['permissionDecision'], 'deny')
-        self.assertIn('target store', denied['hookSpecificOutput']['permissionDecisionReason'])
+        self.assertEqual(self.call(event='PreToolUse', guard_command=command, guard_tool='mcp__other__memory_recall'), '')
+        matcher = json.loads((ROOT / 'hooks' / 'hooks.json').read_text())['hooks']['PreToolUse'][0]['matcher']
+        for tool in ('mcp__respire__memory_remember','memory_remember','mcp__rsrs__memory_remember','memory_update','mcp__rsrs__memory_update'):
+            self.assertIsNotNone(re.fullmatch(matcher, tool))
+            denied = json.loads(self.call(event='PreToolUse', guard_tool=tool))
+            self.assertEqual(denied['hookSpecificOutput']['permissionDecision'], 'deny')
+            self.assertIn('target store', denied['hookSpecificOutput']['permissionDecisionReason'])
 
     def test_store_warn_is_written_not_refused(self):
         # CLI 契约：status=warn + 有效 id = 已提交但有警告（parent 未解析等）——
