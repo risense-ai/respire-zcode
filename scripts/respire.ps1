@@ -17,7 +17,7 @@ param([Parameter(Mandatory = $true, Position = 0)][string]$Event)
 
 $ErrorActionPreference = 'Stop'
 
-$VERSION = '0.1.15'
+$VERSION = '0.1.16'
 
 # 超时窗（秒）：与 respire.py 相同口径，盖住 rsrs runtime 冷启动
 $T_RECALL = 14; $T_PROBE = 10; $T_STORE = 18; $T_LIST = 6; $T_SHOW = 8
@@ -476,6 +476,16 @@ function Invoke-MarkPrompt([string]$session) {
 
 function Invoke-MarkStore([string]$session, [double]$gen) {
     [void](Update-StateMap $session @{ 'store_ts' = (Get-NowEpoch); 'store_req_ts' = $gen })
+}
+
+function Test-TurnStored([string]$session) {
+    # 0.1.16 免催凭证：gen 标记是「当前请求」真值来源；store_req_ts 与当前 gen 一致才免催。
+    # 标记缺失/POISON/状态缺失一律 $false——免催失败方向安全：宁催勿漏。
+    $gen = Read-GenMarker $session
+    if ($null -eq $gen -or [double]::IsInfinity($gen)) { return $false }
+    $st = Read-StateMap $session
+    if (-not $st -or -not $st.ContainsKey('store_req_ts')) { return $false }
+    try { return ([double]$st['store_req_ts'] -eq [double]$gen) } catch { return $false }
 }
 
 # ---------- 引擎编排（probe / recall / store / readback / verify） ----------
@@ -1132,6 +1142,17 @@ function Invoke-PreToolUse([hashtable]$data, [hashtable]$cfg, [string]$engine) {
         }
         $verified[$parent]=$true
     }
+    if ($writes.Count -gt 0) {
+        # 0.1.16：放行合规落库命令 → 按当前请求代登记 store 信号，Stop 据此免催；
+        # gen 标记缺失/POISON（写故障降级）不登记——免催失败方向安全（宁催勿漏）
+        $session = ''
+        try { if ($data['session_id']) { $session = [string]$data['session_id'] } } catch { }
+        $gen = Read-GenMarker $session
+        if ($null -ne $gen -and -not [double]::IsInfinity($gen)) {
+            Invoke-MarkStore $session $gen
+            Write-HookLog $cfg 'pretool' 'store_marked'
+        }
+    }
     return ''
 }
 
@@ -1165,6 +1186,12 @@ function Invoke-OnStop([hashtable]$data, [hashtable]$cfg, [string]$engine) {
     } catch { }
     $session = ''
     try { if ($data['session_id']) { $session = [string]$data['session_id'] } } catch { }
+    # 0.1.16 免催：本请求已有合规落库命令放行（PreToolUse 登记、gen 归属一致）→ 放行；
+    # 信号缺失或任何读失败都照常催存——免催失败方向安全，绝不凭旧记录免催
+    if (Test-TurnStored $session) {
+        Write-HookLog $cfg 'stop' 'stored_skip'
+        return ''
+    }
     if (-not (Test-LatchClaim $session)) {
         Write-HookLog $cfg 'stop' 'once_latch_skip'
         return ''

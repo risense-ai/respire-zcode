@@ -23,7 +23,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.1.15"
+VERSION = "0.1.16"
 
 # 超时窗（秒）：须盖住 rsrs runtime 冷启动（实测 doctor 模型加载 7s+），否则首轮静默、热后即灵
 RECALL_T = 14
@@ -434,14 +434,17 @@ def mark_store(session: str, gen: float = 0.0):
 
 
 def turn_stored(session: str) -> bool:
-    """磁盘凭证免催已**取消**（复核⑥终案）：跨事件（UserPromptSubmit→Stop 是两个独立
-    hook 进程）没有可靠的「当前请求」身份可写入磁盘而不依赖任何文件操作成功——
-    unlink/写/锁任一环节的失败-恢复窗口都无法闭合（复核④⑤⑥逐轮证伪）。
-    免催的唯一依据回归 **latch 语义**：latch 在 Stop 的 nudge 时创建、由下一次真实
-    prompt 删除；「已催过」由 latch 存在与否判定（一次收尾锁），本函数恒 False——
-    即 Stop 永远按节流策略催存，绝不凭磁盘旧记录免催。本层「记：」写回执仍然
-    输出给模型（诚实告知已存），但不再影响 Stop 决策。"""
-    return False
+    """免催凭证（0.1.16 恢复，可归属信号）：gen 标记是「当前请求」的真值来源，
+    PreToolUse 放行合规落库命令时以当前 gen 登记 store_req_ts（mark_store）。
+    仅当 store_req_ts 与当前 gen 完全一致才免催——旧请求凭证在新 prompt 后 gen
+    已换（mark_prompt unlink-first 物理删除状态文件），绝不误免催；标记缺失/
+    POISON/状态缺失一律 False。免催失败方向安全：登记失败 → 照常催存（宁催勿漏）。
+    信号来自本层 PreToolUse 的自有观察，Stop 仍完全不查询引擎。"""
+    gen = _read_gen_marker(session)
+    if gen is None or gen == POISON:
+        return False
+    v = _map_load(session).get("store_req_ts")
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and float(v) == gen
 
 
 def readback(bin_path: str, sid: str, title: str, content: str, cfg: dict, budget_s: float):
@@ -861,7 +864,8 @@ def on_stop(data: dict, cfg: dict, engine):
     审计整改后的免催/放行契约（ZC-01/ZC-04/ZC-05 + 复核整改）：
       - 每个真实请求至多 block 一次：每会话原子锁（O_EXCL）＋ 新 prompt 重新武装；
         无法落锁（状态不可写/并发落败）一律放行——绝不无锁 block
-      - 本轮已有成功写回执（同会话、prompt 之后）→ 放行（唯一免催凭证，可归属本层写入）
+      - 本请求已有合规落库命令放行（PreToolUse 登记、gen 归属一致）→ 免催（0.1.16）；
+        信号来自本层自有观察，Stop 完全不查询引擎；任何登记/读取失败都照常催存
       - 不再用全库最新写入时间做免催（无法归属会话；其他会话写入会误抑制）
       - 本层不再在 Stop 里查询引擎：无查库故障强迫续跑路径"""
     if data.get("stop_hook_active") is True:
@@ -889,6 +893,11 @@ def on_stop(data: dict, cfg: dict, engine):
     except Exception:
         pass
     session = str(data.get("session_id") or "")
+    # 0.1.16 免催：本请求已有合规落库命令放行（PreToolUse 登记、gen 归属一致）→ 放行；
+    # 信号缺失或任何读失败都照常催存——免催失败方向安全，绝不凭旧记录免催
+    if turn_stored(session):
+        log_event(cfg, "stop", "stored_skip")
+        return ""
     # 一次收尾锁：O_EXCL 原子独占；无法落锁（含目录不可写）一律放行——绝不无锁 block
     if not latch_claim(session):
         log_event(cfg, "stop", "once_latch_skip")
@@ -1180,6 +1189,14 @@ def on_pre_tool_use(data: dict, cfg: dict, engine):
             log_event(cfg, "pretool", "deny_parent_unverified")
             return _guard_deny("Respire blocked this write because the literal parent could not be verified by a read-only show. Report missing placement as pending; do not force, guess a parent, or change engine mode.")
         verified.add(parent)
+    if writes:
+        # 0.1.16：放行合规落库命令 → 按当前请求代登记 store 信号，Stop 据此免催。
+        # gen 标记是「当前请求」真值来源；缺失/POISON（写故障降级）不登记——宁催勿漏。
+        session = str(data.get("session_id") or "")
+        gen = _read_gen_marker(session)
+        if gen is not None and gen != POISON:
+            mark_store(session, gen)
+            log_event(cfg, "pretool", "store_marked")
     return ""
 
 

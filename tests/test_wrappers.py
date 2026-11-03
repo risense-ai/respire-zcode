@@ -270,6 +270,29 @@ class TestRespirePs1(unittest.TestCase):
         out2 = self.run_hook("Stop", {"hook_event_name": "Stop", "session_id": "t", "stop_hook_active": False})
         self.assertEqual(out2, "")   # latch 已落：第二次放行
 
+    def test_stop_skips_after_allowed_remember(self):
+        # 0.1.16 免催：prompt（记请求代）→ 合规 remember 放行（登记 store 信号）→ Stop 零输出放行
+        self.run_hook("UserPromptSubmit", {"hook_event_name": "UserPromptSubmit", "session_id": "t",
+                                           "prompt": "recall fixture query"})
+        cmd = 'rsrs remember "fact" --title "title" --importance important --parent ' + FAKE_SID
+        pre = self.run_hook("PreToolUse", {"hook_event_name": "PreToolUse", "session_id": "t",
+                                           "tool_name": "Bash", "tool_input": {"command": cmd}},
+                            fake_store_status="parented")
+        self.assertEqual(pre, "")
+        self.assertEqual(self.run_hook("Stop", {"hook_event_name": "Stop", "session_id": "t",
+                                                "stop_hook_active": False}), "")
+
+    def test_stop_blocks_after_denied_remember(self):
+        # deny 不登记免催：unsafe 落库被拒后，Stop 仍按契约催存
+        self.run_hook("UserPromptSubmit", {"hook_event_name": "UserPromptSubmit", "session_id": "t",
+                                           "prompt": "recall fixture query"})
+        cmd = 'rsrs remember "fact" --title "title" --importance important --force'
+        pre = self.run_hook("PreToolUse", {"hook_event_name": "PreToolUse", "session_id": "t",
+                                           "tool_name": "Bash", "tool_input": {"command": cmd}})
+        self.assertEqual(json.loads(pre)["hookSpecificOutput"]["permissionDecision"], "deny")
+        out = self.run_hook("Stop", {"hook_event_name": "Stop", "session_id": "t", "stop_hook_active": False})
+        self.assertEqual(json.loads(out).get("decision"), "block")
+
     def test_stop_active_passes(self):
         out = self.run_hook("Stop", {"hook_event_name": "Stop", "session_id": "t", "stop_hook_active": True})
         self.assertEqual(out, "")

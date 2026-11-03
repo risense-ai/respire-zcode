@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.16 — 2026-11-03
+
+- The Stop storage check no longer forces a continuation turn when a compliant `rsrs remember` command was already allowed by the PreToolUse guard within the same request: the guard marks the request generation on allow, and Stop skips the nudge when the marker generation matches (`turn_stored` is real again, request-scoped). This removes the desktop UX artifact where the forced continuation collapsed the finished answer under a "worked X min" header with only the memory-check line visible.
+- Failure direction stays safe: missing / POISON / unreadable markers never suppress, denied or unattempted writes still nudge as before, and stale receipts from earlier requests cannot suppress a later request (unlink-first invalidation on every real prompt). Stop still never queries the engine — the signal is the guard's own observation.
+- Tests: spy-harness cases for suppress-after-allow / still-block-after-deny / request-scoped receipts / poison paths, plus PowerShell wrapper parity cases updated to the new contract.
+
 ## 0.1.15 — 2026-11-03
 
 - Bilingual presentation with automatic language selection: add `description_i18n` (en / zh-CN) to the plugin manifest and restore zh-CN `displayName_i18n` / `description_i18n` in the marketplace listing, so the ZCode client picks the user's language for the plugin name and description.
