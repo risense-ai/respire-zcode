@@ -529,6 +529,13 @@ else: sys.exit(1)
         out = json.loads(self.call(event='Stop'))
         self.assertEqual(out['decision'], 'block')
 
+    def test_stop_suppressed_after_allowed_merge(self):
+        # 0.1.17：merge 不进守卫拦截面（放行），但出现写动词即登记免催
+        self.call('ordinary fixture input')
+        self.assertEqual(self.call(event='PreToolUse',
+                                   guard_command='rsrs merge dddddddddddddddd --content "merged fact"'), '')
+        self.assertEqual(self.call(event='Stop'), '')
+
     def test_stop_every_third_request_and_disabled_zero_calls(self):
         for number in range(1, 7):
             self.call(f'ordinary input {number}')          # 每轮都是新请求：重新武装收尾预算

@@ -23,7 +23,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.1.16"
+VERSION = "0.1.17"
 
 # 超时窗（秒）：须盖住 rsrs runtime 冷启动（实测 doctor 模型加载 7s+），否则首轮静默、热后即灵
 RECALL_T = 14
@@ -1130,6 +1130,11 @@ def _is_mcp_memory_write(tool) -> bool:
     return bool(re.fullmatch(r"(?:mcp__.+__)?memory_(?:remember|update)", str(tool or ""), re.I))
 
 
+# 0.1.17 免催登记面：放行命令中出现任一记忆写动词（merge 不在守卫拦截面内，仅作免催登记）
+_MEMORY_WRITE_VERB = re.compile(
+    r"\brsrs(?:\.(?:exe|cmd|ps1))?\s+(?:--[\w-]+(?:=\S+)?\s+)*(?:remember|update|merge)\b", re.I)
+
+
 def _guard_entry(engine, requested: str, deadline: float):
     if not engine or deadline - time.monotonic() <= 0:
         return None
@@ -1189,9 +1194,10 @@ def on_pre_tool_use(data: dict, cfg: dict, engine):
             log_event(cfg, "pretool", "deny_parent_unverified")
             return _guard_deny("Respire blocked this write because the literal parent could not be verified by a read-only show. Report missing placement as pending; do not force, guess a parent, or change engine mode.")
         verified.add(parent)
-    if writes:
-        # 0.1.16：放行合规落库命令 → 按当前请求代登记 store 信号，Stop 据此免催。
-        # gen 标记是「当前请求」真值来源；缺失/POISON（写故障降级）不登记——宁催勿漏。
+    # 0.1.16：放行合规落库命令 → 按当前请求代登记 store 信号，Stop 据此免催。
+    # gen 标记是「当前请求」真值来源；缺失/POISON（写故障降级）不登记——宁催勿漏。
+    # 0.1.17：登记面覆盖 remember/update（守卫分类）与 merge（不进守卫拦截面，仅免催登记）。
+    if writes or _MEMORY_WRITE_VERB.search(command):
         session = str(data.get("session_id") or "")
         gen = _read_gen_marker(session)
         if gen is not None and gen != POISON:
