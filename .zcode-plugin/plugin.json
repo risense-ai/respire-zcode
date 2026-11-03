@@ -1,7 +1,11 @@
 {
   "name": "respire",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "description": "respire memory for ZCode: every-round title-tier recall, pending prefix handoff and Bash write guard, model-optional degradation. Works fully offline; only encrypted records reach the cloud; enterprises can self-host the sync server. On-machine registration via rsrs register; the sidecar model is an optional boost.",
+  "description_i18n": {
+    "en": "respire memory for ZCode: every-round title-tier recall, pending prefix handoff and Bash write guard, model-optional degradation. Works fully offline; only encrypted records reach the cloud; enterprises can self-host the sync server. On-machine registration via rsrs register; the sidecar model is an optional boost.",
+    "zh-CN": "respire 本地加密记忆（ZCode 插件）：每轮标题档自动召回、「记：」前缀交主模型审查后落库、Bash 写前防护；不装模型也完全可用，仅加密记录上云，企业可自托管同步服务。本机 rsrs register 注册，端侧模型为可选增强。"
+  },
   "author": {
     "name": "risense-ai"
   },
