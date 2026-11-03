@@ -1,147 +1,147 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+  <img src="assets/logo.svg" alt="respire — local encrypted memory for ZCode">
+</picture>
+
 # respire-zcode
 
-> 吸即存，呼即取——给 ZCode 装上本地加密记忆。
+> Store on the inhale, recall on the exhale — local encrypted memory for ZCode.
 
-`respire` 是 ZCode 标准插件：以命令钩子把 [respire（CLI 名 rsrs）](https://www.npmjs.com/package/rsrs-cli) 记忆引擎挂进 agent 循环——每轮标题档自动召回、「记：」前缀交主模型审查后存储、Stop 存储检查。本地优先、端侧加密、云端 LWW 同步；**不带自定义安装脚本，按 ZCode 插件市场标准安装**。
+`respire` is a standard ZCode plugin that wires the [respire memory engine](https://www.npmjs.com/package/rsrs-cli) (CLI name `rsrs`) into the agent loop with command hooks: automatic title-tier recall on every turn, an explicit store prefix handed back to the model for review, a Stop-time storage check, and a PreToolUse write guard. Local-first, encrypted on device, LWW sync through the cloud; **no custom install scripts — it installs through the standard ZCode plugin marketplace**.
 
-姊妹仓：[respire-dimcode](https://github.com/risense-ai/respire-dimcode)（Dim）· [respire-qoder](https://github.com/risense-ai/respire-qoder)（Qoder）· respire-workbuddy（WorkBuddy）——四宿主共用同一钩子方案与打包口径，差异只在宿主协议适配。
+Sister repos: [respire-dimcode](https://github.com/risense-ai/respire-dimcode) (Dim) · [respire-qoder](https://github.com/risense-ai/respire-qoder) (Qoder) · respire-workbuddy (WorkBuddy) — four hosts share the same hook design and packaging; only the host protocol adaptation differs.
 
-## 不装模型完全可用（降级是一等公民）
+## Fully usable without a model
 
-- **注册、登录、同步、召回全不依赖端侧模型**——装完插件即可用，未装模型时引擎自动走词面档。
-- BGE-M3 是**纯可选增强**：想要更好的语义召回再 `rsrs model install && rsrs model activate m3`，插件检测到未装会在会话内提示一句，装与不装都不报错、不拦路。
+- **Registration, login, sync, and recall never depend on an on-device model** — the plugin works right after install; without a model the engine automatically falls back to the lexical tier.
+- BGE-M3 is a **purely optional boost**: install it only if you want better semantic recall (`rsrs model install && rsrs model activate m3`). The plugin notices when it is missing and mentions it once in-session; installing or not installing never errors and never blocks anything.
 
-## 安装（ZCode 插件市场 · 本地目录源）
+## Install (ZCode plugin marketplace · local directory source)
 
 ```bash
 git clone https://github.com/risense-ai/respire-zcode.git && cd respire-zcode
-python3 scripts/validate_plugin.py                     # 自检：结构/清单/hooks/敏感扫描
+python3 scripts/validate_plugin.py                     # self-check: structure / manifests / hooks / sensitive scan
 ```
 
-然后在本机 ZCode 客户端：
+Then in your local ZCode client:
 
-1. **插件市场 → 添加 → 添加插件市场**，粘贴本仓目录（市场根=仓根，清单在 `.claude-plugin/marketplace.json`）；
-2. **个人 → risense-zcode → respire → 安装**；
-3. **新会话**生效——SessionStart 注入简则即标志挂接成功。
+1. **Plugin Marketplace → Add → Add marketplace**, paste this repo directory (market root = repo root; manifest at `.claude-plugin/marketplace.json`);
+2. **Personal → risense-zcode → respire → Install**;
+3. Takes effect in a **new session** — the SessionStart playbook injection is the sign that the hooks are live.
 
-引擎（rsrs CLI）缺失时插件会在会话内注入装法（`npm i -g rsrs-cli@latest`），可让 agent 代装。
+When the engine (`rsrs` CLI) is missing, the plugin injects the install command into the session (`npm i -g rsrs-cli@latest`) and the agent can install it on your behalf.
 
-管理入口：**设置 → 插件**。插件钩子随安装自动生效，无需另开配置开关。
+Management entry point: **Settings → Plugins**. Plugin hooks activate automatically with the install; no extra configuration switches are needed.
 
-## 定位：安装器 ＋ 管理器 ＋ 正常钩子
+## What the plugin is: installer + manager + normal hooks
 
-插件只做三件，装完自走一条生命周期：
+The plugin does exactly three things and walks one lifecycle after install:
 
-1. **引擎未装时＝安装器**：SessionStart 把安装命令直接注给 agent 代跑（`npm i -g rsrs-cli@latest`＋权限兜底＋`rsrs --version` 验证），并顺手交代配置下一步（rsrs.rs 注册／`rsrs register`／模型可选）——无需用户手动操作；
-2. **Engine discovery runs on each hook**: once the engine is available, normal recall and pending-prefix review become available in the current session.
-3. **管理器三档开关**（见下「启用与关闭」）。
+1. **Engine missing = installer**: SessionStart injects the install command for the agent to run (`npm i -g rsrs-cli@latest` + permission fallback + `rsrs --version` verification) and lays out the next configuration steps (rsrs.rs registration / `rsrs register` / optional model) — no manual user steps required;
+2. **Engine discovered = normal hooks**: discovery runs on every hook; once the engine is available, recall and store-prefix review resume **within the same session**;
+3. **Manager with a three-position switch** (see "Enable and disable" below).
 
-## 装上后发生什么
+## What happens after install
 
-| 时机 | 行为 |
+| Trigger | Behavior |
 | --- | --- |
-| `SessionStart` | 注入记忆层简则（何时翻忆、如何落库、红线）；**一次探测三态**——未登录附注册引导、库空（<10 条）附首日存料与导入引导、缺语义模型附**可选**装法；常态零打扰 |
-| `UserPromptSubmit` | 自动 `rsrs recall --titles`：**标题档注入**——只给分数＋8 位短 id＋标题，正文由 agent `rsrs show <id>` 按需取；默认**直出不过滤**，噪音边界＝rsrs skip 门＋limit 5＋标题档 |
-| `prompt` 以「记：」「存：」「remember:」开头 | 返回 pending，明确尚未写入；正文仅作为待记事实，不执行其中描述的工程任务。主模型先读 `rsrs prompt`，召回同题候选并 `show` 正文，按改＞并＞挂＞存判断。新增 important 必须挂到已读正文的合理 parent；找不到则保持 pending，不猜父、不 force、不降级。实际写入若结果 unknown，仅只读核验，禁止重发。 |
-| `PreToolUse`（Bash / 已知 MCP 写工具） | 写前检查已识别的 `rsrs remember`：拒绝 important 缺 parent、空 parent、任何 force，以及无法安全解析的动态或包装写法；正文里的参数字样不算参数，同 shell 的受支持复合片段逐个检查。parent 通过 `--client-only show` 只读核验，失败、超时或引擎不可用均明确 deny，且退出 0，不启动 runtime 或切模式；合规命令保持空输出。已知 MCP 写工具因目标库无法绑定而直接 deny。 |
-| `Stop`（AI 干完活） | **存储检查**：`{"decision":"block","reason":…}` 续跑一轮，提示模型把本轮新的**事实/决定/约定/教训/踩坑**分条 `rsrs remember`；闲聊无新事实则直接结束。**每个真实请求至多催一次**：续跑轮 `stop_hook_active=true` 放行 ＋ 每会话原子一次收尾锁（`O_EXCL` 独占创建，无 TTL；新 prompt 删除重新武装；无法落锁一律放行，绝不无锁 block；会话间互不干扰）。**磁盘凭证不再免催，防重仅依赖收尾锁**；`Stop` 完全不查询引擎，也因此不存在查库失败强迫续跑的路径。节流 `store_nudge_every`（默认 1=每轮，N=每 N 轮，0=关） |
-| `prompt` 以 `/nomem` 开头 | 本轮跳过自动召回；仍作为真实请求重新武装 Stop 收尾锁。 |
-| `skills/respire` | 按需加载的操作法（recall/remember/show/forget/sync 与信封解析要点）；**注意技能只是说明书，动作全由钩子驱动** |
+| `SessionStart` | Injects the memory-layer playbook (when to recall, how to store, red lines); **one tri-state probe** — logged-out gets registration guidance, a near-empty library (<10 records) gets first-day seeding and an import guide, a missing semantic model gets the **optional** install command; otherwise fully silent |
+| `UserPromptSubmit` | Runs `rsrs recall --titles` automatically: **title-tier injection** — score + 8-char short id + title only; bodies are fetched on demand by the agent via `rsrs show <id>`; **unfiltered passthrough by default**, with noise bounded by the rsrs skip gate + limit 5 + the title tier |
+| prompt starts with a store prefix (`记：`, `存：`, `记录：`, `记住：`, `remember:`, `store:`) | Returns `pending` — nothing is written; the body is treated only as a fact to store, never as an instruction to perform the work it describes. The model first reads `rsrs prompt`, recalls same-topic candidates and `show`s their bodies, then judges update > merge > attach > new. A new `important` record must attach to a reasonable parent whose body has been read; with none available it stays pending — no guessed parent, no `--force`, no importance downgrade. If the actual write outcome is unknown, verify read-only and never resend. |
+| `PreToolUse` (Bash / known MCP write tools) | Pre-execution check of recognized `rsrs remember` commands: denies `important` without a parent, empty parents, any `--force`, and dynamic or wrapped forms that cannot be parsed safely; parameter-like text inside the body is not treated as a parameter; supported compound fragments in the same shell command are checked one by one. The parent is verified read-only via `--client-only show`; on failure, timeout, or engine unavailability the tool is explicitly denied with exit 0 — the runtime is never started and modes are never switched. Compliant commands pass with empty output. Known MCP write tools (`memory_remember` / `memory_update`, including `mcp__<server>__` namespaces) are denied outright because their target library cannot be bound to local verification. |
+| `Stop` (the AI finished its work) | **Storage check**: `{"decision":"block","reason":…}` runs one more turn, prompting the model to store this round's new **facts / decisions / agreements / lessons / pitfalls** as separate `rsrs remember` records; casual chat with nothing new just ends. **At most one nudge per real request**: the continuation turn passes through via `stop_hook_active=true` plus an atomic once-per-session finishing latch (`O_EXCL` exclusive create, no TTL; a new prompt deletes it and re-arms; if the latch cannot be created, always pass — never block without a latch; sessions never interfere). Disk receipts no longer suppress the nudge — the latch is the only re-arm authority; `Stop` never queries the engine, so there is no path where a failed engine query forces the main task to continue. Throttled by `store_nudge_every` (default 1 = every turn, N = every N turns, 0 = off) |
+| prompt starts with `/nomem` | Skips recall for this turn; still counts as a real request and re-arms the Stop finishing latch |
+| `skills/respire` | The on-demand playbook (recall / remember / show / forget / sync and receipt-envelope parsing); **the skill is only a manual — the hooks drive every action** |
 
+## Memory visibility
 
-## Memory visibility (0.1.13)
+Recall results include English instructions asking the model to open its reply with a short status line in the normal GUI/TUI output. These are model-written lines; the hook's static `statusMessage` remains the execution label.
 
-Recall results now include English instructions in `additionalContext` asking the model to display a short line in its normal GUI or TUI reply. These are model-written reply lines; the hook's static `statusMessage` remains the execution label.
+- `Memory: N found` counts only candidates actually injected after sensitive-title filtering, score filtering, the result limit, and the candidate-text budget. A credential detector excludes sensitive-looking titles without logging their values. **Candidates are not adoptions.**
+- `Memory: no match` means an `ok` recall supplied no retained candidates, or a `skip` receipt explicitly reported `summary.count: 0`. Other skip receipts show `Memory: skipped`. `Memory: unavailable` means recall failed or the engine was unavailable. `/nomem`, short prompts, and sensitive input also show skipped without querying the engine.
+- Store prefixes keep their zero-write pending handoff and request `Save: needs review` — never an invented `Last save` or verified status.
+- `Used:` appears only after a body was successfully read and actually used, defaulting to `[ref]`; `[basis]` requires a verified source that still holds in scope, and `[history]` marks outdated, superseded, or conflicting context. Agreements prove only the agreement, not execution; scores, importance, and save receipts never establish credibility on their own.
+- Requests for strict JSON, a fixed format, or only-specified output omit every status label. Status never creates an extra reply, applies only to the current turn, and never changes recall, storage policy, or the write guard.
 
-- `Memory: N found` counts only candidates actually injected after sensitive-title filtering, score filtering, the result limit and the candidate-text budget. The existing credential detector excludes sensitive-looking titles without logging their values. Candidates are not adoptions.
-- `Memory: no match` means an `ok` recall supplied no retained candidates, or a `skip` receipt explicitly reported `summary.count: 0`. Other skip receipts show `Memory: skipped`. `Memory: unavailable` means recall failed or the engine was unavailable. `/nomem`, short prompts and sensitive input also show skipped without querying the engine.
-- Explicit memory prefixes retain their zero-write pending handoff and request `Save: needs review`. No previous save receipt is supplied, so no Last save or verified status is invented.
+## The write guard in detail
 
-`Used:` is requested only after a body was successfully read and actually used. It defaults to `[ref]`; `[basis]` requires a verified source that still holds in scope, and `[history]` is limited to historical context. Agreements do not prove execution, and scores, importance and save receipts do not establish credibility. A mixed record uses the most conservative label for the part used. Short real IDs and real titles follow the Codex rules, including ambiguity handling, sensitive-title hiding and a maximum of 24 Unicode characters per title.
+Only model-prompt constraints existed in 0.1.11 — on this machine the model was reproduced executing `rsrs remember ... --importance important --force` through Bash straight after receiving the new prompts, writing to the root with no parent. Since 0.1.12 a real PreToolUse deny stops such commands before they reach the executor, and known MCP memory write tools are denied the same way (their target library cannot be verified locally, so the plugin requires explicit CLI commands instead of pretending a local `show` proves a remote write).
 
-Strict JSON, fixed-format and only-specified output requests omit every status label, including Used and unused. Status never creates an extra reply, applies only to the current turn, and does not change recall, storage policy or the write guard. Existing empty/internal requests and a disabled plugin remain silent. This change adds no automatic write, receipt collector or PostToolUse listener.
+The CLI branch handles recognized Bash `rsrs remember` calls and `update --importance important` promotions with explicit literal arguments, quoting, redirections, and common compound-command separators. Dynamic substitution and recognized wrapped forms must be rewritten as one explicit command; this is not a universal write barrier for arbitrary scripts, unknown aliases, custom tools, or other processes. Ordinary trivial journaling needs no parent but `--force` stays denied. All remember merges require an explicit parent with read-only verification; `update` promotions to `important` first `show` the target and verify its existing non-empty parent — a missing attachment is denied and an explicit attach is requested first. Read-only commands and unrelated tools get neither allow nor deny.
 
-## 0.1.12 写前拦截边界
+A successful read-only `show` proves only that the parent id exists — not that the model has read the body, and not that the attachment is semantically sound; the model must still perform the SKILL's candidate review. The pending-prefix path still returns pending without auto-filling parents or writing on the model's behalf, and the unknown-outcome no-retry rule for real writes is unchanged.
 
-已知 MCP 写工具 `memory_remember` / `memory_update` (including `mcp__<server>__` namespaces) 也注册写前 deny。其目标库无法与本地核验绑定，因此不调用本地 show 冒充远程核验，而是要求改用显式 CLI 命令。未知 MCP 工具仍不在此边界内。
+## ZCode protocol adaptation (three substantive differences from the sister repos, checked against the ZCode runtime source)
 
-0.1.11 只有模型提示约束。本机已复现模型在收到新提示后，仍通过 Bash 直接执行 `rsrs remember ... --importance important --force`，没有 parent，最终写到根节点。0.1.12 增加真实 PreToolUse deny，阻止该命令进入执行器。
+1. **The output channel is JSON, not plain text**: ZCode accepts hook stdout only if it starts with `{` and passes a strict schema — plain text is silently dropped and invalid JSON fails the hook. Every injection therefore goes through a top-level `{"additionalContext": "…"}` (consumed by SessionStart / UserPromptSubmit / Stop alike).
+2. **The Stop block decision enum is `approve|block`**: use `{"decision":"block","reason":…}`; the Qoder variant's `"deny"` fails the ZCode schema (Hook stdout failed schema validation).
+3. **The data directory env var is `ZCODE_PLUGIN_DATA`** (probe chain `RESPITE_DATA` → `ZCODE_PLUGIN_DATA` → script directory); stdin carries the full event fields (`prompt` / `stop_hook_active` / `hook_event_name`), with event identification falling back argv → stdin → `ZCODE_HOOK_EVENT`. hooks.json carries only `command` / `timeout` / `statusMessage` (the ZCode schema does not know `commandWindows`).
 
-CLI 分支处理已识别的 Bash `rsrs remember` 调用和 `update --importance important` 提升，支持明确的字面量参数、引号、重定向和常见复合命令分隔。动态替换及已识别的包装写法需要改成一条明确命令；它不是任意脚本、未知别名、自定义工具或其他进程的通用写屏障。普通 trivial 日记不要求 parent，但仍禁止 force。所有 remember 合并都要求显式 parent 并只读核验；update 提升 important 会先 show 目标，再核验其现有非空 parent，缺挂靠则拒绝并要求先 attach。只读命令和无关工具不返回 allow 或 deny。
+## First use · three things
 
-只读 `show` 成功只证明 parent ID 存在，不能证明模型此前已读正文，也不能证明语义挂靠合理；模型仍必须执行 SKILL 的候选核查。未决前缀依旧返回 pending，不自动补父或代写。实际已发写入的 unknown 禁重试规则保持不变。
+1. **Register and log in** (works out of the box, no model needed): register at [rsrs.rs](https://rsrs.rs) → run `rsrs register` locally; day-to-day `rsrs login` uses browser authorization; autosync stays on, `rsrs sync` syncs manually, `rsrs status` shows the state.
+2. **Import existing rules and memories (one pass, LLM-extracted)**: open a new ZCode task and paste the whole block —
 
-## ZCode 协议适配（与姊妹仓的三处实质差异，已核 ZCode runtime 源码）
+   > Import my machine's existing rules and memories into respire: read each of — `~/.zcode/AGENTS.md` (home-directory rules, if present), the workspace-root and per-project `AGENTS.md` files, and `~/.agents/skills/*/SKILL.md`; extract reusable facts, conventions, lessons, and red lines (exclude passwords, ID numbers, card numbers, and private keys entirely — record only where they are stored); before any write, read `rsrs prompt`, recall same-topic candidates and `show` their bodies, then judge update > merge > attach > new; store only genuinely new facts with `rsrs remember --importance important --parent <an already-read, reasonable parent>`, one fact per record with a fact-sentence title; keep records pending when no reasonable parent exists; give me an inventory when done.
 
-1. **输出通道是 JSON 不是纯文本**：ZCode 对 hook stdout 只认以 `{` 开头且过严格 schema 的 JSON——纯文本被静默丢弃、非法 JSON 判 hook 失败。故一切注入走顶层 `{"additionalContext": "…"}`（SessionStart / UserPromptSubmit / Stop 三事件均消费）。
-2. **Stop 阻塞决策枚举是 `approve|block`**：用 `{"decision":"block","reason":…}`；Qoder 版的 `"deny"` 在 ZCode 过不了 schema（会报 Hook stdout failed schema validation）。
-3. **数据目录环境变量 `ZCODE_PLUGIN_DATA`**（探测链 `RESPITE_DATA` → `ZCODE_PLUGIN_DATA` → 脚本目录）；stdin 全量携带事件字段（`prompt` / `stop_hook_active` / `hook_event_name`），事件识别 argv → stdin → `ZCODE_HOOK_EVENT` 三级回退。hooks.json 不带 `commandWindows`（ZCode schema 未收录该字段），仅 `command`/`timeout`/`statusMessage`。
+   On day one with an empty library, SessionStart injects the same guide.
+3. **On-device model (optional boost)**: `rsrs model install && rsrs model activate m3` — fully usable without it; install only for better semantic recall.
 
-## 首次使用 · 三件事
+## Tuning (optional)
 
-1. **注册登录**（开箱即用，不依赖模型）：[rsrs.rs](https://rsrs.rs) 注册 → 本机 `rsrs register`；日常 `rsrs login` 浏览器授权；autosync 常开，`rsrs sync` 手动同步，`rsrs status` 查态。
-2. **导入既有记忆与规则（一次成库，LLM 代抽）**：开个 ZCode 新任务粘贴下面整段——
+`hooks/respire.config.json` inside the plugin install directory (missing = all defaults; a new session picks changes up; **never touches login or the account**; template at `hooks/respire.config.example.json`):
 
-   > 请把本机的既有规则与记忆导入 respire：逐个读取——`~/.zcode/AGENTS.md`（家目录规则，若在）、工作区根与各项目的 `AGENTS.md`、`~/.agents/skills/*/SKILL.md`；抽出可复用的事实、约定、教训与红线（口令、证件号、卡号、私钥一律排除、只记位置），先读 `rsrs prompt`，召回同题候选并 `show` 正文，按改＞并＞挂＞存判断；只有真正新增的事实才用 `rsrs remember --importance important --parent <已读合理父节点>`，标题按事实句，没有合理父节点则保持 pending，存完给我一份清单。
-
-   空库首日 SessionStart 会注入同一线索。
-3. **端侧模型（可选增强）**：`rsrs model install && rsrs model activate m3`——不装完全可用，想要更好语义召回再装。
-
-## 调优（可选）
-
-插件安装目录下 `hooks/respire.config.json`（缺失即全默认，改完新会话生效；**不涉及登录与账号**；模板见 `hooks/respire.config.example.json`）：
-
-| 字段 | 默认 | 含义 |
+| Field | Default | Meaning |
 | --- | --- | --- |
-| `rsrs` | `""` | 引擎路径；空 = 自动探测（PATH → `~/.local/bin` → `~/.rsrs/bin`） |
-| `recall_threshold` | `0.0` | 召回下限；**0=默认关（rsrs 直出）**，设正数才启用过滤 |
-| `recall_limit` | `5` | 取前 N 条 |
-| `min_prompt_chars` | `2` | 1 字才跳，2 字起即查 |
-| `session_rules` | `true` | 是否注入 SessionStart 简则 |
-| `budget_chars` | `1500` | 单轮注入总预算（标题行远短于此） |
-| `enabled` | `true` | **总开关**：false=全线静默 |
-| `store_nudge_every` | `1` | Stop 存储检查节流：1=每轮、N=每 N 轮、0=关（每轮=多一轮模型小调用） |
-| `skip_prefixes` | `[]` | 宿主内部提示白名单：命中前缀的 prompt 不召回不落库（如宿主自动化 Recap） |
-| `log` | `true` | 数据目录 `hook.log` 留痕（超 256KB 清轮） |
+| `rsrs` | `""` | Engine path; empty = auto-probe (PATH → `~/.local/bin` → `~/.rsrs/bin`) |
+| `recall_threshold` | `0.0` | Recall floor; **0 = off by default (rsrs passes results straight through)** — a positive value enables filtering |
+| `recall_limit` | `5` | Take the top N |
+| `min_prompt_chars` | `2` | Skip 1-char prompts, query from 2 chars |
+| `session_rules` | `true` | Whether SessionStart injects the playbook |
+| `budget_chars` | `1500` | Total per-turn injection budget (title lines stay far below it) |
+| `enabled` | `true` | **Master switch**: false = the whole layer goes silent |
+| `store_nudge_every` | `1` | Stop storage-check throttle: 1 = every turn, N = every N turns, 0 = off (1 = one small extra model call per turn) |
+| `skip_prefixes` | `[]` | Host-internal prompt allowlist: matching prompts are neither recalled nor stored (e.g. host automation recaps) |
+| `log` | `true` | `hook.log` in the data directory (rotated past 256KB) |
 
-过滤策略：**默认不设阈值**——三层已框住噪音：rsrs skip 门、limit 5、标题档。历史教训：阈值每降一次都是真相关被拦的补救，漏召代价远大于多看两行标题。
+Filtering policy: **no threshold by default** — three layers already bound the noise: the rsrs skip gate, limit 5, and the title tier. Hard lesson: every threshold lowering was a remedy for real hits being blocked; a missed memory costs far more than two extra title lines.
 
-## 卸载
+## Enable and disable
 
-**设置 → 插件** 找到 respire 停用或卸载；或删除市场源（**插件市场 → 市场源 → risense-zcode**）后一并移除。
+**Settings → Plugins**: disable or uninstall respire; or remove the marketplace source (**Plugin Marketplace → Marketplace sources → risense-zcode**) to take the plugin with it.
 
-## 设计要点
+## Design notes
 
-- **fail-open**：hook 任何异常 → 空 stdout + `exit 0`，永不拦会话；失败必留痕于 hook.log。**Stop 查库失败同样放行**——记忆层故障不强迫主任务续跑
-- **写结果状态机**：`ok`/`warn`=已写（warn 带警告）、`pending`=未写待决、超时/坏回执=未知（只读核实、禁重发）、其余=明确拒绝；与 CLI 信封语义一一对应，绝不把「已写带警告」当失败、不把「未知」当失败引导重写
-- **JSON 输出契约**：文本 → `{"additionalContext":…}`，Stop 阻塞 → `{"decision":"block","reason":…}`，无输出即无决策
-- **标题档注入**：`recall --titles` 只回 id/score/title，正文交 `show` 按需拉取；`superseded_by` 标「已被取代」
-- **先查并挂再存**：前缀钩子零写入；主模型按现有 CLI 政策更新、合并或挂靠，没有合理父节点时保持 pending
-- **`${CLAUDE_PLUGIN_ROOT}` 占位符**：ZCode 运行时替换为插件安装根，跨机器自洽；Windows 走 `scripts/respire.ps1`（respire.py 的 PowerShell 5.1 原生移植，直接编排 rsrs、不依赖 Python；Windows 默认无 Python 且 `python3/python` 常命中商店占位 stub），回落 `python3 || python` 链跑 `hooks/respire.py`（Unix 兜底）
-- **包内自检**：`python3 scripts/validate_plugin.py`（结构/清单/hooks 形状/可编译/fail-open/ZCode 输出契约/敏感扫描），分发前必跑
+- **fail-open**: any hook exception → empty stdout + `exit 0`, never blocking the session; every failure leaves a trace in hook.log. **A failed engine query at Stop passes too** — a memory-layer failure must never force the main task to continue
+- **Write-result state machine**: `ok`/`warn` = written (warn carries engine warnings), `pending` = not written, awaiting a decision, timeout / bad receipt = unknown (read-only verification, never resend), anything else = explicitly refused — a 1:1 mapping of the CLI receipt-envelope semantics; "written with warnings" is never reported as a failure, and "unknown" is never reported as a failure inviting a rewrite
+- **JSON output contract**: text → `{"additionalContext":…}`, Stop blocking → `{"decision":"block","reason":…}`, no output = no decision
+- **Title-tier injection**: `recall --titles` returns only id/score/title; bodies are pulled on demand via `show`; `superseded_by` marks "superseded"
+- **Review first, then store**: the prefix hook is zero-write; the model updates, merges, or attaches per existing CLI policy, and keeps the record pending when no reasonable parent exists
+- **`${CLAUDE_PLUGIN_ROOT}` placeholder**: replaced by the ZCode runtime with the plugin install root, self-consistent across machines; Windows runs `scripts/respire.ps1` (a native PowerShell 5.1 port of respire.py that orchestrates rsrs directly, no Python — Windows ships no Python by default and `python3`/`python` often hit the Store stub), falling back to a `python3 || python` chain running `hooks/respire.py` (Unix fallback)
+- **In-package self-check**: `python3 scripts/validate_plugin.py` (structure / manifests / hook shapes / compilability / fail-open / ZCode output contract / sensitive scan) — mandatory before distribution
 
-## 已知边界
+## Known limits
 
-- **召回质量是引擎上限**：用词鸿沟下 BGE-M3 可能漏召真条——简则已约束模型「命中不贴题换词补查」（同义词/上位词/英文词分路）
-- **冷启动窗**：runtime 冷启＋模型加载实测 7s+，故 hook timeout 20s、recall 14s、probe 10s；探测失败时 SessionStart 注入诊断段
-- **钩子生效以新会话为准**：安装/更新后旧会话不热载；ZCode 限 Stop 续跑至多三次，本层每轮至多催一次
-- **留痕**：数据目录 `hook.log` 每事件一行（ts/ev/out/ms/d 含 query 摘要），按行复盘「灵不灵」
+- **Recall quality is bounded by the engine**: across a wording gap BGE-M3 can miss real records — the playbook already instructs the model to "re-query with different words when a hit looks off-topic" (synonyms / hypernyms / English routes)
+- **Cold-start window**: runtime cold start + model load measured at 7s+, hence hook timeout 20s, recall 14s, probe 10s; on probe failure SessionStart injects a diagnostic section
+- **Hooks take effect in a new session**: installs and updates do not hot-load into old sessions; ZCode caps Stop continuations at three, and this layer nudges at most once per turn
+- **Traces**: the data directory `hook.log` keeps one line per event (ts/ev/out/ms/d including a query digest) for post-hoc "did it work" reviews
 
-## 测试
+## Tests
 
 ```bash
-python3 scripts/validate_plugin.py   # 包结构自检
-bash tests/test_hooks.sh             # 行为只读断言（简则/召回/清洗/引导/JSON 契约），不碰库
-bash tests/test_hooks.sh --store     # 加写探针（写真库→回执→rsrs forget 自清理）
+python3 scripts/validate_plugin.py   # package structure self-check
+bash tests/test_hooks.sh             # read-only behavior assertions (playbook / recall / cleanup / guidance / JSON contract), never touches the library
+bash tests/test_hooks.sh --store     # adds write probes (write real library → receipt → rsrs forget self-cleanup)
 ```
 
-rsrs 无 data-dir 隔离（runtime 单例＋全局 client.json），故写测试仅在显式开启时进行，即写即忘。
+rsrs has no data-dir isolation (single runtime + global client.json), so write tests run only when explicitly requested and clean up after themselves.
 
-## 发版
+## Release
 
 ```bash
-git tag 0.1.0 && git push origin 0.1.0   # tag 须等于 manifest version
-# CI：validate + package → GitHub Release 自动挂 dist/respire-<ver>-<date>.zip
+git tag 0.1.0 && git push origin 0.1.0   # the tag must equal the manifest version
+# CI: validate + package → GitHub Release automatically attaches dist/respire-<ver>-<date>.zip
 ```
 
 ## License
@@ -150,12 +150,12 @@ MIT
 
 ## GitHub Actions CI/CD
 
-PR/main 在 Linux、Windows、macOS 执行包自检、全桩隔离行为/版本测试和发布策略测试，再验证源码归档。CI 入口为 `python tests/test_ci.py` 与 `python -m unittest discover -s tests -p test_release.py -v`，不会运行旧 `test_hooks.sh` 的真实引擎/写探针段。测试使用临时 HOME、配置、数据、日志和引擎桩；普通输入必须召回成功，死桩/坏 JSON 必须无法通过正向对照，凭据轮零引擎调用且无日志泄漏。
+PRs and main run the package self-check, fully stubbed isolated behavior/version tests, and release-policy tests on Linux, Windows, and macOS, then verify the source archive. CI entry points are `python tests/test_ci.py` and `python -m unittest discover -s tests -p test_release.py -v`; the real-engine / write-probe sections of the legacy `test_hooks.sh` are not executed. Tests use temporary HOME, config, data, log, and engine stubs; normal input must recall successfully, dead stubs / bad JSON must fail the positive control, and credential rounds make zero engine calls with no log leakage.
 
-沿用不带 v 的三段版本标签及原插件根目录布局；ZIP 名仍为 `respire-版本-YYYYMMDD.zip`，日期固定取源提交 UTC 日期以使重试稳定。ZIP 注释为精确提交 SHA；标签、manifest、hook VERSION（及已有市场版本字段）必须一致。旧 `scripts/package.sh` 保留供原本地流程使用，新 Actions 只归档已提交文件，不执行标签中的代码。
+Version tags stay three-part without a `v` prefix and the plugin-root layout is unchanged; the ZIP name remains `respire-<version>-<YYYYMMDD>.zip` with the date fixed to the source commit's UTC date so retries are stable. The ZIP comment carries the exact commit SHA; tag, manifest, and hook VERSION (plus the existing marketplace version field) must agree. The legacy `scripts/package.sh` remains for the original local flow; the new Actions only archive committed files and never execute code from the tag.
 
-发布/恢复：正常推送新版本标签触发；已有标签可从 Actions → release → Run workflow 选择 main，显式填写 tag 和完整 expected_sha。流程校验远端既有标签与 main 祖先关系，不移动标签、不用新 main 冒充旧代码。只接受同来源、同校验和的已有资产；补缺失，不覆盖冲突，Release 同时提供 ZIP 与 SHA256SUMS。
+Release / restore: a normal push of a new version tag triggers a release; an existing tag can be re-released from Actions → release → Run workflow on main with the tag and the full expected_sha filled in explicitly. The flow verifies the existing remote tag's ancestry against main — it never moves tags and never passes new main off as old code. Only existing assets with the same origin and checksum are accepted; missing ones are added, conflicting ones are never overwritten, and the Release ships both the ZIP and SHA256SUMS.
 
-默认 contents:read、checkout 不持久化凭据；仅独立受控发布 job 使用 GITHUB_TOKEN 的 contents:write。无新 secret/PAT/OAuth，不使用 pull_request_target，fork PR 不可发布。同版 tag/恢复共用并发锁。原 plugin-zip artifact 名、cleanup-receipt、清理策略/脚本保留，清理收据等待检查、打包和发布消费者结束。
+Default workflows run with contents:read and no persisted credentials; only the separate, gated release job uses GITHUB_TOKEN with contents:write. No new secrets/PAT/OAuth, no pull_request_target, fork PRs cannot publish. The same-version tag and restore runs share one concurrency lock. The original plugin-zip artifact name, cleanup-receipt, and cleanup policy/scripts are preserved; cleanup receipts wait for the check, package, and release consumers to finish.
 
-三平台桩测试不等于真实 ZCode 宿主、GUI 派发或安装后的解释器回退验收；旧完整测试套件与作者称基线失败仍不作为独立通过证据。
+Three-platform stub tests are not acceptance by the real ZCode host, GUI dispatch, or post-install interpreter fallback; the legacy full test suite and author-claimed baseline failures are still not standalone evidence of passing.

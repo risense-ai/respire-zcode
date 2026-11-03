@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.14 — 2026-11-03
+
+- Rewrite the README in English end to end: install flow, installer/manager/normal-hooks lifecycle, the full four-hook table (SessionStart, UserPromptSubmit, store prefixes, PreToolUse, Stop, /nomem, skill), memory visibility status lines, the write-guard boundary, ZCode protocol adaptation, tuning, tests and CI/CD release policy. The versioned 0.1.12/0.1.13 notes are folded into the standing documentation.
+- Refresh the brand icons: add `assets/logo.svg` (light) and `assets/logo-dark.svg` (dark) — the same pair as the codex sister repo — and remove the legacy `logo.png`; the README shows both via a prefers-color-scheme picture block.
+- English-only marketplace listing: drop the zh-CN `displayName_i18n`/`description_i18n` fields and align the listing description with the plugin manifest wording.
+- No hook behavior changes; version constants in both hook implementations bump in lockstep with the manifests.
+
 ## 0.1.13 — 2026-11-02
 
 - Request model-written Memory lines through additionalContext for recall candidates, no match, skipped input and unavailable recall. Counts follow the final injected candidates; static hook execution labels remain unchanged.
