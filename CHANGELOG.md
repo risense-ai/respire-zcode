@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.15 — 2026-11-03
+
+- Bilingual presentation with automatic language selection: add `description_i18n` (en / zh-CN) to the plugin manifest and restore zh-CN `displayName_i18n` / `description_i18n` in the marketplace listing, so the ZCode client picks the user's language for the plugin name and description.
+- Add `README.zh-CN.md`, a full Chinese mirror of the English README; both files cross-link at the top (`English | 简体中文`).
+
 ## 0.1.14 — 2026-11-03
 
 - Rewrite the README in English end to end: install flow, installer/manager/normal-hooks lifecycle, the full four-hook table (SessionStart, UserPromptSubmit, store prefixes, PreToolUse, Stop, /nomem, skill), memory visibility status lines, the write-guard boundary, ZCode protocol adaptation, tuning, tests and CI/CD release policy. The versioned 0.1.12/0.1.13 notes are folded into the standing documentation.

@@ -5,6 +5,8 @@
 
 # respire-zcode
 
+English | [简体中文](README.zh-CN.md)
+
 > Store on the inhale, recall on the exhale — local encrypted memory for ZCode.
 
 `respire` is a standard ZCode plugin that wires the [respire memory engine](https://www.npmjs.com/package/rsrs-cli) (CLI name `rsrs`) into the agent loop with command hooks: automatic title-tier recall on every turn, an explicit store prefix handed back to the model for review, a Stop-time storage check, and a PreToolUse write guard. Local-first, encrypted on device, LWW sync through the cloud; **no custom install scripts — it installs through the standard ZCode plugin marketplace**.
