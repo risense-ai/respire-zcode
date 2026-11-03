@@ -51,7 +51,7 @@ python3 scripts/validate_plugin.py                     # 自检：结构/清单/
 | `UserPromptSubmit` | 自动 `rsrs recall --titles`：**标题档注入**——只给分数＋8 位短 id＋标题，正文由 agent `rsrs show <id>` 按需取；默认**直出不过滤**，噪音边界＝rsrs skip 门＋limit 5＋标题档 |
 | prompt 以落库前缀（`记：`、`存：`、`记录：`、`记住：`、`remember:`、`store:`）开头 | 返回 `pending`——零写入；正文仅作为待记事实，不执行其中描述的工程任务。主模型先读 `rsrs prompt`，召回同题候选并 `show` 正文，按改＞并＞挂＞存判断。新增 `important` 必须挂到已读正文的合理 parent；找不到则保持 pending——不猜父、不 `--force`、不降级。实际写入若结果 unknown，仅只读核验，禁止重发。 |
 | `PreToolUse`（Bash / 已知 MCP 写工具） | 执行前检查已识别的 `rsrs remember`：拒绝 `important` 缺 parent、空 parent、任何 `--force`，以及无法安全解析的动态或包装写法；正文里的参数字样不算参数，同 shell 的受支持复合片段逐个检查。parent 经 `--client-only show` 只读核验，失败、超时或引擎不可用均明确 deny 且退出 0——不启动 runtime、不切模式。合规命令空输出放行。已知 MCP 写工具（`memory_remember` / `memory_update`，含 `mcp__<server>__` 命名空间）目标库无法与本地核验绑定，直接 deny。 |
-| `Stop`（AI 干完活） | **存储检查**：`{"decision":"block","reason":…}` 续跑一轮，提示模型把本轮新的**事实/决定/约定/教训/踩坑**分条 `rsrs remember`；闲聊无新事实则直接结束。**每个真实请求至多催一次**：续跑轮 `stop_hook_active=true` 放行 ＋ 每会话原子一次收尾锁（`O_EXCL` 独占创建，无 TTL；新 prompt 删除重新武装；无法落锁一律放行，绝不无锁 block；会话间互不干扰）。磁盘凭证不再免催，防重仅依赖收尾锁；`Stop` 完全不查询引擎，因此不存在查库失败强迫主任务续跑的路径。节流 `store_nudge_every`（默认 1=每轮、N=每 N 轮、0=关） |
+| `Stop`（AI 干完活） | **存储检查**：`{"decision":"block","reason":…}` 续跑一轮，提示模型把本轮新的**事实/决定/约定/教训/踩坑**分条 `rsrs remember`；闲聊无新事实则直接结束。**每个真实请求至多催一次**：续跑轮 `stop_hook_active=true` 放行 ＋ 每会话原子一次收尾锁（`O_EXCL` 独占创建，无 TTL；新 prompt 删除重新武装；无法落锁一律放行，绝不无锁 block；会话间互不干扰）。磁盘凭证不再免催，防重仅依赖收尾锁；`Stop` 完全不查询引擎，因此不存在查库失败强迫主任务续跑的路径。节流 `store_nudge_every`（默认 1=每轮、N=每 N 轮、0=关）。同一请求内被 PreToolUse 放行的合规 `rsrs remember` 会抑制本次检查——gen 请求代归属、会话本地、钩子自有观察（Stop 仍完全不查询引擎；登记失败照常催存）。 |
 | prompt 以 `/nomem` 开头 | 本轮跳过召回；仍算真实请求并重新武装 Stop 收尾锁 |
 | `skills/respire` | 按需加载的操作法（recall / remember / show / forget / sync 与信封解析要点）；**技能只是说明书，动作全由钩子驱动** |
 
@@ -119,6 +119,7 @@ CLI 分支处理已识别的 Bash `rsrs remember` 调用和 `update --importance
 - **JSON 输出契约**：文本 → `{"additionalContext":…}`，Stop 阻塞 → `{"decision":"block","reason":…}`，无输出即无决策
 - **标题档注入**：`recall --titles` 只回 id/score/title，正文交 `show` 按需拉取；`superseded_by` 标「已被取代」
 - **先查并挂再存**：前缀钩子零写入；主模型按现有 CLI 政策更新、合并或挂靠，没有合理父节点时保持 pending
+- **免催按请求代归属**：防护放行合规 `rsrs remember` 时登记当前请求代，Stop 在标记一致时免催——失败方向永远是多催，绝不静默漏催
 - **`${CLAUDE_PLUGIN_ROOT}` 占位符**：ZCode 运行时替换为插件安装根，跨机器自洽；Windows 走 `scripts/respire.ps1`（respire.py 的 PowerShell 5.1 原生移植，直接编排 rsrs、不依赖 Python；Windows 默认无 Python 且 `python3`/`python` 常命中商店占位 stub），回落 `python3 || python` 链跑 `hooks/respire.py`（Unix 兜底）
 - **包内自检**：`python3 scripts/validate_plugin.py`（结构/清单/hooks 形状/可编译/fail-open/ZCode 输出契约/敏感扫描），分发前必跑
 

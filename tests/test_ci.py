@@ -509,6 +509,26 @@ else: sys.exit(1)
         self.assertEqual(self.recorded(), before)
         self.assertEqual((self.case / 'nudge').read_text(encoding="utf-8"), count)
 
+    def test_stop_suppressed_after_allowed_guard_write(self):
+        # 0.1.16 免催：本请求已有合规落库命令放行（PreToolUse 登记、gen 归属一致）
+        # → Stop 零输出放行，不再强迫续跑一轮（桌面端会话折叠的直接来源）
+        self.call('ordinary fixture input')   # 真实请求：记请求代并重武装收尾锁
+        self.assertEqual(self.call(event='PreToolUse',
+                                   guard_command='rsrs remember "fixture fact" --title "fixture" '
+                                                 '--importance important --parent dddddddddddddddd',
+                                   guard_parent='dddddddddddddddd'), '')
+        self.assertEqual(self.call(event='Stop'), '')
+
+    def test_stop_still_blocks_after_denied_guard_write(self):
+        # deny 不登记免催：unsafe 落库尝试被拒后，Stop 仍按契约催存一次
+        self.call('ordinary fixture input')
+        denied = json.loads(self.call(event='PreToolUse',
+                                      guard_command='rsrs remember "fixture fact" --title "fixture" '
+                                                    '--importance important --force'))
+        self.assertEqual(denied['hookSpecificOutput']['permissionDecision'], 'deny')
+        out = json.loads(self.call(event='Stop'))
+        self.assertEqual(out['decision'], 'block')
+
     def test_stop_every_third_request_and_disabled_zero_calls(self):
         for number in range(1, 7):
             self.call(f'ordinary input {number}')          # 每轮都是新请求：重新武装收尾预算
@@ -611,7 +631,7 @@ else: sys.exit(1)
             sid = 'failreg'
             gen1 = mod.mark_prompt(sid)
             mod.mark_store(sid, gen1)
-            self.assertFalse(mod.turn_stored(sid))  # 免催已取消（复核⑥）
+            self.assertTrue(mod.turn_stored(sid))   # 0.1.16：同代新鲜凭证可归属 → 免催
             lock = mod._map_lock(sid, wait_s=0.05)
             self.assertIsNotNone(lock)
             try:
@@ -622,12 +642,12 @@ else: sys.exit(1)
                 mod._release_lock(lock)
             self.assertFalse(mod.turn_stored(sid))
             mod.mark_store(sid, gen2)
-            # 登记曾失败：pt 仍是 gen1 ≠ marker(gen2)——本轮凭证保守失效（多催方向）
-            self.assertFalse(mod.turn_stored(sid))
-            # 恢复路径：锁已释放，下一请求 gen3 正常登记+写入（免催已取消，恒 False）
+            # 登记带当前 gen（marker 真值来源）→ 与当前代一致 → 免催；状态 prompt_ts 陈旧无关
+            self.assertTrue(mod.turn_stored(sid))
+            # 恢复路径：锁已释放，下一请求 gen3 正常登记+写入
             gen3 = mod.mark_prompt(sid)
             mod.mark_store(sid, gen3)
-            self.assertFalse(mod.turn_stored(sid))
+            self.assertTrue(mod.turn_stored(sid))
         finally:
             if old is not None:
                 os4.environ['RESPITE_TURN_STATE'] = old
@@ -650,7 +670,7 @@ else: sys.exit(1)
             sid = 'poison'
             gen1 = mod.mark_prompt(sid)
             mod.mark_store(sid, gen1)
-            self.assertFalse(mod.turn_stored(sid))      # 免催已取消（复核⑥）：恒 False
+            self.assertTrue(mod.turn_stored(sid))       # 0.1.16：同代新鲜凭证可归属 → 免催
             state_p = P6(mod._state_path(sid))
             self.assertTrue(state_p.exists())
             # 三写全部失败（同一磁盘故障）：marker/POISON/state 均返回 False
@@ -662,10 +682,10 @@ else: sys.exit(1)
             mod._map_update = orig_u
             # 不再调用 mark_prompt、不手动写 POISON——当前请求 Stop：
             self.assertFalse(state_p.exists())          # 旧状态文件已物理删除
-            self.assertFalse(mod.turn_stored(sid))     # 免催已取消：恒 False
+            self.assertFalse(mod.turn_stored(sid))     # 状态已 unlink、无凭证可归属 → 不免催（宁催勿漏）
             gen3 = mod.mark_prompt(sid)                 # 恢复路径（下一请求）
             mod.mark_store(sid, gen3)
-            self.assertFalse(mod.turn_stored(sid))     # 免催已取消：恒 False（回执仍给模型）
+            self.assertTrue(mod.turn_stored(sid))      # 0.1.16：恢复后同代凭证 → 免催
         finally:
             if old is not None:
                 os6.environ['RESPITE_TURN_STATE'] = old
@@ -746,7 +766,7 @@ else: sys.exit(1)
             # 事务锁保证：本进程持锁读改写期间，另一持锁进程不可能交错写回
             # （直接验证锁的互斥；外部无锁裸写不在插件控制面内）
             self.assertTrue(mod._map_update(sid, {'store_ts': _t.time(), 'store_req_ts': gen2}))
-            self.assertFalse(mod.turn_stored(sid))              # 免催已取消（复核⑥）
+            self.assertTrue(mod.turn_stored(sid))               # 0.1.16：当前代凭证 → 免催
             # 旧代凭证（gen1）完成后写回：store_req_ts 回到旧代 → 不免催新代（复审①交错）
             self.assertTrue(mod._map_update(sid, {'store_ts': _t.time(), 'store_req_ts': stale.get('prompt_ts', 0)}))
             self.assertFalse(mod.turn_stored(sid))
@@ -760,7 +780,7 @@ else: sys.exit(1)
             # 解锁后正常更新可用（写入仅作诊断，不再免催）
             gen_now = mod._map_load(sid).get('prompt_ts')
             self.assertTrue(mod._map_update(sid, {'store_ts': _t.time(), 'store_req_ts': gen_now}))
-            self.assertFalse(mod.turn_stored(sid))  # 免催已取消（复核⑥）
+            self.assertTrue(mod.turn_stored(sid))  # 0.1.16：当前代凭证 → 免催
         finally:
             if old is not None:
                 os2.environ['RESPITE_TURN_STATE'] = old
@@ -823,7 +843,7 @@ else: sys.exit(1)
             self.assertTrue(mod._map_update('A', {'prompt_ts': now - 100, 'store_ts': now - 50,
                                                   'store_req_ts': now - 100}))
             self.assertTrue(mod._write_gen_marker('A', now - 100))
-            self.assertFalse(mod.turn_stored('A'))  # 免催已取消（复核⑥）
+            self.assertTrue(mod.turn_stored('A'))   # 0.1.16：同代凭证可归属 → 免催
             a_path = base / ('st_' + mod._sid_key('A') + '.json')
             self.assertTrue(a_path.is_file())
             raw_before = a_path.read_bytes()
@@ -840,10 +860,10 @@ else: sys.exit(1)
             self.assertFalse(mod.turn_stored('A'))
             # A 当前代写入凭证不被 B 更新抹掉（另一方向的反向覆盖也曾丢凭证致多余催存）
             mod.mark_store('A', genA2)
-            self.assertFalse(mod.turn_stored('A'))  # 免催已取消
+            self.assertTrue(mod.turn_stored('A'))   # 0.1.16：A 当前代凭证 → 免催
             mod.mark_prompt('B')
             mod.mark_store('B')
-            self.assertFalse(mod.turn_stored('A'))
+            self.assertTrue(mod.turn_stored('A'))   # B 的写不触碰 A：免催判定不变
         finally:
             if old is not None:
                 os.environ['RESPITE_TURN_STATE'] = old
@@ -886,20 +906,20 @@ else: sys.exit(1)
         finally:
             pass
 
-    def test_stop_after_hook_store_queries_nothing_but_still_nudges(self):
-        # 复核⑥：磁盘凭证免催已取消——Stop 不查引擎，但也不凭旧记录免催（仍催一次）
+    def test_stop_after_hook_store_skips_with_zero_queries(self):
+        # 0.1.16：同代落库凭证（direct store 回执 ok/warn）→ Stop 免催且零引擎查询
         self.call('store: durable fixture fact', direct_store=True)
         before = self.recorded()
-        self.assertTrue(json.loads(self.call(event='Stop'))['decision'], 'block')
+        self.assertEqual(self.call(event='Stop'), '')
         self.assertEqual(self.recorded(), before)  # 零引擎查询
 
     def test_turn_receipt_suppression_is_request_scoped(self):
-        # 复核⑥：磁盘凭证免催已取消——Stop 不凭旧记录免催；同请求二次 Stop 由 latch 放行
+        # 0.1.16：同代凭证免催（Stop 零输出放行）；跨请求旧凭证失效——新请求未存仍催
         self.call('store: durable fixture fact', direct_store=True)
-        self.assertTrue(json.loads(self.call(event='Stop'))['decision'] == 'block')  # 仍催
+        self.assertEqual(self.call(event='Stop'), '')                                # 同代凭证：免催
         self.assertEqual(self.call(event='Stop', active=True), '')                   # latch：同请求一次
         self.call('another ordinary input without storing')
-        self.assertEqual(json.loads(self.call(event='Stop'))['decision'], 'block')
+        self.assertEqual(json.loads(self.call(event='Stop'))['decision'], 'block')   # 新请求未存：仍催
 
     def test_stop_once_per_request_latch(self):
         # ZC-05：宿主未带 stop_hook_active 时，同一请求也至多催一次；新请求重新武装
