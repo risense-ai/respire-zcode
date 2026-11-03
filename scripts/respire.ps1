@@ -17,7 +17,7 @@ param([Parameter(Mandatory = $true, Position = 0)][string]$Event)
 
 $ErrorActionPreference = 'Stop'
 
-$VERSION = '0.1.16'
+$VERSION = '0.1.17'
 
 # 超时窗（秒）：与 respire.py 相同口径，盖住 rsrs runtime 冷启动
 $T_RECALL = 14; $T_PROBE = 10; $T_STORE = 18; $T_LIST = 6; $T_SHOW = 8
@@ -1142,9 +1142,10 @@ function Invoke-PreToolUse([hashtable]$data, [hashtable]$cfg, [string]$engine) {
         }
         $verified[$parent]=$true
     }
-    if ($writes.Count -gt 0) {
+    if ($writes.Count -gt 0 -or $command -imatch '\brsrs(?:\.(?:exe|cmd|ps1))?\s+(?:--[\w-]+(?:=\S+)?\s+)*(?:remember|update|merge)\b') {
         # 0.1.16：放行合规落库命令 → 按当前请求代登记 store 信号，Stop 据此免催；
-        # gen 标记缺失/POISON（写故障降级）不登记——免催失败方向安全（宁催勿漏）
+        # gen 标记缺失/POISON（写故障降级）不登记——免催失败方向安全（宁催勿漏）。
+        # 0.1.17：登记面覆盖 remember/update（守卫分类）与 merge（不进守卫拦截面，仅免催登记）。
         $session = ''
         try { if ($data['session_id']) { $session = [string]$data['session_id'] } } catch { }
         $gen = Read-GenMarker $session

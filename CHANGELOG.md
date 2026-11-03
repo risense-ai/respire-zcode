@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.17 — 2026-11-03
+
+- Extend the wrap-up suppression marking to `merge`: any allowed command carrying a memory-write verb (`remember` / `update` / `merge`) marks the request generation, so update- and merge-heavy turns no longer trigger the Stop continuation. The guard's deny scope is unchanged — `merge` is not pulled into the interception surface; marking only.
+- Verified on installed 0.1.16 artifacts: compliant remember → `store_marked` → Stop `stored_skip` (no continuation, no desktop fold); un-stored control turn still nudges once (the deliberate wrap-up check for turns that wrote nothing — turns without any memory write keep this one-check-by-design behavior, and `"store_nudge_every": 0` in the plugin config turns it off entirely).
+
 ## 0.1.16 — 2026-11-03
 
 - The Stop storage check no longer forces a continuation turn when a compliant `rsrs remember` command was already allowed by the PreToolUse guard within the same request: the guard marks the request generation on allow, and Stop skips the nudge when the marker generation matches (`turn_stored` is real again, request-scoped). This removes the desktop UX artifact where the forced continuation collapsed the finished answer under a "worked X min" header with only the memory-check line visible.

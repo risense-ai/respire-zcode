@@ -293,6 +293,17 @@ class TestRespirePs1(unittest.TestCase):
         out = self.run_hook("Stop", {"hook_event_name": "Stop", "session_id": "t", "stop_hook_active": False})
         self.assertEqual(json.loads(out).get("decision"), "block")
 
+    def test_stop_skips_after_allowed_merge(self):
+        # 0.1.17：merge 不进守卫拦截面（放行），但出现写动词即登记免催
+        self.run_hook("UserPromptSubmit", {"hook_event_name": "UserPromptSubmit", "session_id": "t",
+                                           "prompt": "recall fixture query"})
+        pre = self.run_hook("PreToolUse", {"hook_event_name": "PreToolUse", "session_id": "t",
+                                           "tool_name": "Bash",
+                                           "tool_input": {"command": 'rsrs merge abcdef0112345678 --content "merged fact"'}})
+        self.assertEqual(pre, "")
+        self.assertEqual(self.run_hook("Stop", {"hook_event_name": "Stop", "session_id": "t",
+                                                "stop_hook_active": False}), "")
+
     def test_stop_active_passes(self):
         out = self.run_hook("Stop", {"hook_event_name": "Stop", "session_id": "t", "stop_hook_active": True})
         self.assertEqual(out, "")
