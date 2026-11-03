@@ -11,15 +11,9 @@
     {
       "name": "respire",
       "source": "./",
-      "version": "0.1.13",
-      "description": "respire memory for ZCode: every-round title-tier recall, one-prefix store, model-optional degradation.",
+      "version": "0.1.14",
+      "description": "respire memory for ZCode: every-round title-tier recall, pending prefix handoff and Bash write guard, model-optional degradation. Works fully offline; only encrypted records reach the cloud.",
       "displayName": "respire",
-      "displayName_i18n": {
-        "zh-CN": "respire 记忆"
-      },
-      "description_i18n": {
-        "zh-CN": "respire 本地加密记忆：每轮自动召回、一句「记：」落库、Stop 存储检查，不装模型也完全可用。"
-      },
       "category": "productivity"
     }
   ]

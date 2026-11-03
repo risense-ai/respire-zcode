@@ -17,7 +17,7 @@ param([Parameter(Mandatory = $true, Position = 0)][string]$Event)
 
 $ErrorActionPreference = 'Stop'
 
-$VERSION = '0.1.13'
+$VERSION = '0.1.14'
 
 # 超时窗（秒）：与 respire.py 相同口径，盖住 rsrs runtime 冷启动
 $T_RECALL = 14; $T_PROBE = 10; $T_STORE = 18; $T_LIST = 6; $T_SHOW = 8
